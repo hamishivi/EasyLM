@@ -161,8 +161,8 @@ def ppo_step(
     prompt_input_ids, prompt_attn_mask = batch['prompt_input_ids'], batch['prompt_attn_mask']
     reward_prompt_input_ids, reward_prompt_attn_mask = batch['reward_prompt_input_ids'], batch['reward_prompt_attn_mask']
     # weird results when sharding these, so only allow fsdp axis sharding.
-    # prompt_input_ids = with_sharding_constraint(prompt_input_ids, PS(('fsdp')))
-    # prompt_attn_mask = with_sharding_constraint(prompt_attn_mask, PS(('fsdp')))
+    prompt_input_ids = with_sharding_constraint(prompt_input_ids, PS(('fsdp')))
+    prompt_attn_mask = with_sharding_constraint(prompt_attn_mask, PS(('fsdp')))
     rng_generator = JaxRNG(rng)
     PL = prompt_input_ids.shape[1]
 
