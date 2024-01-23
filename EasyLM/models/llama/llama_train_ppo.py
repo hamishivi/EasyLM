@@ -20,12 +20,12 @@ from EasyLM.jax_utils import (
     JaxRNG, JaxDistributedConfig, next_rng, match_partition_rules,
     global_norm, get_float_dtype_by_name, set_random_seed,
     get_weight_decay_mask, make_shard_and_gather_fns,
-    with_sharding_constraint
+    with_sharding_constraint, FlaxTemperatureLogitsWarper
 )
 from EasyLM.models.llama.llama_model import (
     LLaMAConfig, FlaxLLaMAForCausalLMModule, FlaxLLaMAForCausalLM
 )
-from transformers import GenerationConfig
+from transformers import GenerationConfig, FlaxLogitsProcessorList
 
 
 FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
@@ -160,6 +160,8 @@ def ppo_step(
 ):
     prompt_input_ids, prompt_attn_mask = batch['prompt_input_ids'], batch['prompt_attn_mask']
     reward_prompt_input_ids, reward_prompt_attn_mask = batch['reward_prompt_input_ids'], batch['reward_prompt_attn_mask']
+    prompt_input_ids = with_sharding_constraint(prompt_input_ids, PS(('dp', 'fsdp')))
+    prompt_attn_mask = with_sharding_constraint(prompt_attn_mask, PS(('dp', 'fsdp')))
     rng_generator = JaxRNG(rng)
     PL = prompt_input_ids.shape[1]
 
@@ -171,14 +173,17 @@ def ppo_step(
     pad_token_id = 0
     generation_config = GenerationConfig(
         do_sample=True,
-        temperature=FLAGS.temperature,
         pad_token_id=pad_token_id,
+        eos_token_id=1,
         max_new_tokens=FLAGS.max_continuation_len,
     )
     outputs = policy_model.generate(
         input_ids=prompt_input_ids,
         attention_mask=prompt_attn_mask,
         generation_config=generation_config,
+        logits_processor=FlaxLogitsProcessorList(
+            [FlaxTemperatureLogitsWarper(FLAGS.temperature)]
+        ),
         prng_key=rng_generator(),
         params=policy_train_state.params['params'],
     )
