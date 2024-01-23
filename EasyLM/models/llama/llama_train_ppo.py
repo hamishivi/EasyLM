@@ -161,8 +161,8 @@ def ppo_step(
     prompt_input_ids, prompt_attn_mask = batch['prompt_input_ids'], batch['prompt_attn_mask']
     reward_prompt_input_ids, reward_prompt_attn_mask = batch['reward_prompt_input_ids'], batch['reward_prompt_attn_mask']
     # weird results when sharding these, so only allow fsdp axis sharding.
-    prompt_input_ids = with_sharding_constraint(prompt_input_ids, PS((None, 'fsdp')))
-    prompt_attn_mask = with_sharding_constraint(prompt_attn_mask, PS((None, 'fsdp')))
+    # prompt_input_ids = with_sharding_constraint(prompt_input_ids, PS(('fsdp')))
+    # prompt_attn_mask = with_sharding_constraint(prompt_attn_mask, PS(('fsdp')))
     rng_generator = JaxRNG(rng)
     PL = prompt_input_ids.shape[1]
 
@@ -190,7 +190,7 @@ def ppo_step(
     )
     input_ids = outputs.sequences # (B, L)
     # shard things now since other parts of the pipeline should be fine.
-    input_ids = with_sharding_constraint(input_ids, PS(('dp', 'fsdp')))
+    # input_ids = with_sharding_constraint(input_ids, PS(('dp', 'fsdp')))
     attn_mask = jnp.where(input_ids == pad_token_id, 0, 1) # (B, L)
     position_ids = jnp.clip(jnp.cumsum(attn_mask, axis=1) - 1, 0, None) # (B, L)
     cont_input_ids = input_ids[:, PL:] # (B, CL)
@@ -425,7 +425,7 @@ def main(argv):
         rng, batch,
     ):
         rng_generator = JaxRNG(rng)
-        batch = with_sharding_constraint(batch, PS(('dp', 'fsdp')))
+        # batch = with_sharding_constraint(batch, PS(('dp', 'fsdp')))
         policy_train_state, value_train_state, stats, examples = ppo_step(
             policy_train_state, reference_train_state, value_train_state, reward_train_state,
             policy_model, reference_model, value_model, reward_model,
