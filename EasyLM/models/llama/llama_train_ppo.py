@@ -188,6 +188,8 @@ def ppo_step(
         params=policy_train_state.params['params'],
     )
     input_ids = outputs.sequences # (B, L)
+    # ensure outputs are correctly sharded
+    input_ids = with_sharding_constraint(input_ids, PS(('dp', 'fsdp')))
     attn_mask = jnp.where(input_ids == pad_token_id, 0, 1) # (B, L)
     position_ids = jnp.clip(jnp.cumsum(attn_mask, axis=1) - 1, 0, None) # (B, L)
     cont_input_ids = input_ids[:, PL:] # (B, CL)
