@@ -1,4 +1,4 @@
-gcloud alpha compute tpus tpu-vm ssh jiachengl-tpu-v3-256 --zone=us-east1-d --project=ai2-tpu --worker=all --command="cd n-tulu-ppo-jax; git pull; export WANDB_API_KEY='a46519994b4614615d5ce4aa8742ef19685a7cae'; export LIBTPU_INIT_ARGS='--xla_jf_spmd_threshold_for_windowed_einsum_mib=0 --xla_tpu_spmd_threshold_for_allgather_cse=10000 --xla_tpu_spmd_rewrite_einsum_with_reshape=true --xla_tpu_enable_latency_hiding_scheduler=true TPU_MEGACORE=MEGACORE_DENSE'; python3 -m EasyLM.models.llama.llama_train_ppo \
+gcloud alpha compute tpus tpu-vm ssh hamishi-tpu-v3-256 --zone=us-east1-d --project=ai2-tpu --worker=all --command="cd n-tulu-ppo-jax; git pull; export LIBTPU_INIT_ARGS='--xla_jf_spmd_threshold_for_windowed_einsum_mib=0 --xla_tpu_spmd_threshold_for_allgather_cse=10000 --xla_tpu_spmd_rewrite_einsum_with_reshape=true --xla_tpu_enable_latency_hiding_scheduler=true TPU_MEGACORE=MEGACORE_DENSE'; python3 -m EasyLM.models.llama.llama_train_ppo \
     --mesh_dim='4,8,8' \
     --load_llama_config_policy='7b' \
     --load_llama_config_reward='13b' \
@@ -19,12 +19,12 @@ gcloud alpha compute tpus tpu-vm ssh jiachengl-tpu-v3-256 --zone=us-east1-d --pr
     --optimizer.adamw_optimizer.warmup_ratio=0.0 \
     --checkpointer.save_optimizer_state=False \
     --logger.online=True \
-    --logger.entity='liujch1998' \
-    --logger.project='n-Tulu-PPO-Jax' \
+    --logger.entity='rlhf-llm-dev' \
+    --logger.project='ppo-testing' \
     --logger.prefix='train_v1_t4-8-8_b32_mb32' \
     --logger.prefix_to_id=True \
     --logger.wandb_dir='wandb' \
-    --logger.output_dir='/home/jiachengl/runs/' \
+    --logger.output_dir='gs://hamishi-dev/tmp' \
     --use_tpu=True \
     --mini_batch_size=32 \
     --max_continuation_len=16 \

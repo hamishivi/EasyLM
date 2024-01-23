@@ -18,7 +18,7 @@ python3 -m EasyLM.models.llama.llama_train_ppo \
     --optimizer.adamw_optimizer.end_lr=1e-5 \
     --optimizer.adamw_optimizer.warmup_ratio=0.0 \
     --checkpointer.save_optimizer_state=False \
-    --logger.online=True \
+    --logger.online=False \
     --logger.entity='liujch1998' \
     --logger.project='n-Tulu-PPO-Jax' \
     --logger.prefix='debug' \

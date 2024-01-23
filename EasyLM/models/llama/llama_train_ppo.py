@@ -156,10 +156,11 @@ def compute_advantages(values, rewards, mask):
 def ppo_step(
     policy_train_state, reference_train_state, value_train_state, reward_train_state,
     policy_model, reference_model, value_model, reward_model,
-    batch,
+    batch, rng
 ):
     prompt_input_ids, prompt_attn_mask = batch['prompt_input_ids'], batch['prompt_attn_mask']
     reward_prompt_input_ids, reward_prompt_attn_mask = batch['reward_prompt_input_ids'], batch['reward_prompt_attn_mask']
+    rng_generator = JaxRNG(rng)
     PL = prompt_input_ids.shape[1]
 
     timing = dict()
@@ -178,6 +179,7 @@ def ppo_step(
         input_ids=prompt_input_ids,
         attention_mask=prompt_attn_mask,
         generation_config=generation_config,
+        prng_key=rng_generator(),
         params=policy_train_state.params['params'],
     )
     input_ids = outputs.sequences # (B, L)
@@ -419,7 +421,7 @@ def main(argv):
         policy_train_state, value_train_state, stats, examples = ppo_step(
             policy_train_state, reference_train_state, value_train_state, reward_train_state,
             policy_model, reference_model, value_model, reward_model,
-            batch,
+            batch, rng_generator()
         )
         # we dont return the ref train state because we dont want to update it
         return policy_train_state, value_train_state, rng_generator(), stats, examples
