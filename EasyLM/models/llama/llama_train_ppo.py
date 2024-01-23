@@ -531,6 +531,7 @@ def main(argv):
 
                 if FLAGS.log_freq > 0 and step % FLAGS.log_freq == 0:
                     stats = {k: float(v) for k, v in stats.items()}
+                    examples = jax.device_get(examples)
                     queries = tokenizer.batch_decode(examples['prompt_input_ids'], skip_special_tokens=True)
                     responses = tokenizer.batch_decode(examples['cont_input_ids'], skip_special_tokens=True)
                     # rewards = examples['scores']
