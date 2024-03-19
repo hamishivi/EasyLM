@@ -269,7 +269,7 @@ def write_tokenizer(tokenizer_path, input_tokenizer_path):
         {
             "add_bos_token": True,
             "add_eos_token": False,
-            "model_max_length": 2048,
+            "model_max_length": 4096,
             "pad_token": None,
             "sp_model_kwargs": {},
             "tokenizer_class": "LlamaTokenizer",
