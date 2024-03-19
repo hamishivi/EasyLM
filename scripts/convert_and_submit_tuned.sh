@@ -7,7 +7,7 @@ MODEL_SIZE=$2
 MODEL_NAME=$3
 WORKSPACE=$4
 
-gsutil cp gs://hamishi-dev/easylm/llama/tokenizer.model tokenizer.model
+gsutil cp gs://hamishi-east1/easylm/llama/tokenizer.model tokenizer.model
 
 python -m EasyLM.models.llama.convert_easylm_to_hf --load_checkpoint=params::${MODEL_PATH} --tokenizer_path='tokenizer.model' --model_size=${MODEL_SIZE} --output_dir=tmp
 
