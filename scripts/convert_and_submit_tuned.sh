@@ -16,9 +16,9 @@ beaker dataset create tmp --name ${MODEL_NAME} --workspace ai2/${WORKSPACE} &> t
 # parse beaker id from log. Format: Uploading <name> to <id>
 BEAKER_ID=$(awk '/Uploading/ {print $4}' tmp.log)
 
-python scripts/submit_open_instruct_eval.py --workspace ${WORKSPACE} --model_name ${MODEL_NAME} --location ${BEAKER_ID} --num_gpus 1 --is_tuned
+# python scripts/submit_open_instruct_eval.py --workspace ${WORKSPACE} --model_name ${MODEL_NAME} --location ${BEAKER_ID} --num_gpus 1 --is_tuned
 
-echo  "${MODEL_NAME} uploaded to beaker with id ${BEAKER_ID} and submitted to open instruct eval. Check your beaker experiments for the results!"
+# echo  "${MODEL_NAME} uploaded to beaker with id ${BEAKER_ID} and submitted to open instruct eval. Check your beaker experiments for the results!"
 
 # cleanup
 rm -rf tmp
