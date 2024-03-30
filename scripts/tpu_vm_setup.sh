@@ -16,10 +16,10 @@ sudo apt-get update && sudo apt-get install -y \
 # Python dependencies
 cat > $HOME/tpu_requirements.txt <<- EndOfFile
 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-jax[tpu]==0.4.13
+jax[tpu]==0.4.25
 networkx==3.1
 tensorflow==2.11.0
-flax==0.7.0
+flax==0.8.2
 optax==0.1.7
 distrax==0.1.3
 chex==0.1.7

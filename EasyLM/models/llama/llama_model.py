@@ -225,6 +225,7 @@ LLAMA_STANDARD_CONFIGS = {
         'rms_norm_eps': 1e-6,
         'use_cache': True,
         'tie_word_embeddings': False,
+        'flash_attention': True,
     },
 }
 
@@ -261,6 +262,8 @@ class LLaMAConfig(PretrainedConfig):
             relevant if `config.is_decoder=True`.
         tie_word_embeddings(`bool`, *optional*, defaults to `False`):
             Whether to tie weight embeddings
+        flash_attention (`bool`, *optional*, defaults to `False`):
+            Whether to use the flash attention implementation from pallas.
         Example:
     ```python
     >>> from transformers import LLaMAModel, LLaMAConfig
@@ -304,6 +307,7 @@ class LLaMAConfig(PretrainedConfig):
         fcm_max_ratio=0.0,
         rope_theta=10000,
         use_hf_rotary_emb=False,
+        flash_attention=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -332,6 +336,7 @@ class LLaMAConfig(PretrainedConfig):
         self.fcm_max_ratio = fcm_max_ratio
         self.rope_theta = rope_theta
         self.use_hf_rotary_emb = use_hf_rotary_emb
+        self.flash_attention = flash_attention
         super().__init__(
             # pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -691,6 +696,37 @@ class FlaxLLaMAAttention(nn.Module):
                 float32_logits=True,
                 prevent_cse=True,
             )
+            attn_output = with_sharding_constraint(attn_output, PS(("dp", "fsdp"), None, "mp", None))
+        elif self.config.flash_attention:
+            # import
+            from EasyLM.flash_attention import flash_attention, BlockSizes
+            # repeat out for gqa
+            xk = self.repeat_kv(xk, self.num_repetitions)
+            xv = self.repeat_kv(xv, self.num_repetitions)
+            # permute for flash
+            xq = xq.transpose([0, 2, 1, 3])  # [batch_size, num_heads, q_seq_len, d_model]
+            xk = xk.transpose([0, 2, 1, 3])
+            xv = xv.transpose([0, 2, 1, 3])
+
+            attn_output = flash_attention(
+                xq,
+                xk,
+                xv,
+                causal = True,
+                block_sizes = BlockSizes(
+                    block_q=512,
+                    block_k_major=512,
+                    block_k=512,
+                    block_b=1,
+                    block_q_major_dkv=512,
+                    block_k_major_dkv=512,
+                    block_k_dkv=512,
+                    block_q_dkv=512,
+                    block_k_major_dq=512,
+                    block_k_dq=512,
+                    block_q_dq=512,
+                ))
+            attn_output = attn_output.transpose([0, 2, 1, 3])
             attn_output = with_sharding_constraint(attn_output, PS(("dp", "fsdp"), None, "mp", None))
         else:
             query_length, key_length = xq.shape[1], xk.shape[1]
