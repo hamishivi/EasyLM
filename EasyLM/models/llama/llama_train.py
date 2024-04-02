@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental.pjit import pjit
 from jax.sharding import PartitionSpec as PS
+from flax.core.frozen_dict import unfreeze
 from flax.training.train_state import TrainState
 import torch
 
@@ -131,10 +132,11 @@ def main(argv):
 
     def init_fn(rng):
         rng_generator = JaxRNG(rng)
+        # use real bsz for init so that sharding is correct
         params = model.init(
-            input_ids=jnp.zeros((8, seq_length), dtype=jnp.int32),
-            position_ids=jnp.zeros((8, seq_length), dtype=jnp.int32),
-            attention_mask=jnp.ones((8, seq_length), dtype=jnp.int32),
+            input_ids=jnp.zeros((real_batch_size, seq_length), dtype=jnp.int32),
+            position_ids=jnp.zeros((real_batch_size, seq_length), dtype=jnp.int32),
+            attention_mask=jnp.ones((real_batch_size, seq_length), dtype=jnp.int32),
             rngs=rng_generator(llama_config.rng_keys()),
         )
         return TrainState.create(params=params, tx=optimizer, apply_fn=None)
@@ -249,6 +251,7 @@ def main(argv):
             train_state = sharded_init_fn(next_rng())
         elif train_state is None and restored_params is not None:
             # Restore from params but initialize train_state
+            restored_params = unfreeze(restored_params)
             train_state = sharded_create_trainstate_from_params(restored_params)
             del restored_params
 
