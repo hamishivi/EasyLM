@@ -3,11 +3,13 @@ from shutil import copyfile
 from typing import Any, Dict, List, Optional, Tuple, Union
 import json
 import tempfile
+import functools
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jax.experimental import shard_map
 from jax.sharding import PartitionSpec as PS
 import flax.linen as nn
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
@@ -215,7 +217,7 @@ LLAMA_STANDARD_CONFIGS = {
     },
     'debug': { # A small model for debugging
         'vocab_size': 32000,
-        'hidden_size': 128,
+        'hidden_size': 1024,
         'intermediate_size': 256,
         'num_hidden_layers': 2,
         'num_attention_heads': 4,
@@ -514,6 +516,7 @@ class FlaxLLaMAAttention(nn.Module):
     dtype: jnp.dtype=jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self):
         config = self.config
@@ -617,7 +620,6 @@ class FlaxLLaMAAttention(nn.Module):
             .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
         )
 
-
     def __call__(
         self,
         hidden_states,
@@ -698,8 +700,10 @@ class FlaxLLaMAAttention(nn.Module):
             )
             attn_output = with_sharding_constraint(attn_output, PS(("dp", "fsdp"), None, "mp", None))
         elif self.config.flash_attention:
+            assert self.mesh is not None, "mesh must be provided for flash attention"
             # import
-            from EasyLM.flash_attention import flash_attention, BlockSizes
+            from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
+            from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
             # repeat out for gqa
             xk = self.repeat_kv(xk, self.num_repetitions)
             xv = self.repeat_kv(xv, self.num_repetitions)
@@ -708,24 +712,47 @@ class FlaxLLaMAAttention(nn.Module):
             xk = xk.transpose([0, 2, 1, 3])
             xv = xv.transpose([0, 2, 1, 3])
 
-            attn_output = flash_attention(
-                xq,
-                xk,
-                xv,
-                causal = True,
-                block_sizes = BlockSizes(
-                    block_q=512,
-                    block_k_major=512,
-                    block_k=512,
-                    block_b=1,
-                    block_q_major_dkv=512,
-                    block_k_major_dkv=512,
-                    block_k_dkv=512,
-                    block_q_dkv=512,
-                    block_k_major_dq=512,
-                    block_k_dq=512,
-                    block_q_dq=512,
-                ))
+            # we have to wrap flash attn in shard map
+            # approach from maxtext: https://github.com/google/maxtext/blob/main/MaxText/layers/attentions.py#L223
+            @functools.partial(
+                shard_map.shard_map,
+                mesh=self.mesh,
+                in_specs=( # q, k, v, decoder segment ids.
+                    PS(("dp", "fsdp"), None, "mp", None),
+                    PS(("dp", "fsdp"), None, "mp", None),
+                    PS(("dp", "fsdp"), None, "mp", None),
+                    PS(("dp", "fsdp"), "mp"),
+                ),
+                out_specs=PS(("dp", "fsdp"), None, "mp", None),
+                check_rep=False,
+            )
+            def wrap_flash_attention(query, key, value, decoder_segment_ids):
+                if decoder_segment_ids is not None:
+                    assert (
+                        query.shape[2]
+                        == decoder_segment_ids.q.shape[1]
+                    ), 'Sharding along sequence dimension not allowed in tpu kernel attention'
+                block_sizes = splash_attention_kernel.BlockSizes(
+                                                            block_q=min(512, query.shape[2]),
+                                                            block_kv_compute=min(512, key.shape[2]),
+                                                            block_kv=min(512, key.shape[2]),
+                                                            block_q_dkv=min(512, query.shape[2]),
+                                                            block_kv_dkv=min(512, key.shape[2]),
+                                                            block_kv_dkv_compute=min(512, query.shape[2]),
+                                                            block_q_dq=min(512, query.shape[2]),
+                                                            block_kv_dq=min(512, query.shape[2]),
+                )
+
+                masks = [splash_attention_mask.CausalMask( shape=(query.shape[2],query.shape[2])) for i in range(query.shape[1])]
+                multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
+                splash_kernel = splash_attention_kernel.make_splash_mha(mask = multi_head_mask,
+                                                                        head_shards = 1,
+                                                                        q_seq_shards = 1,
+                                                                        block_sizes = block_sizes)
+                
+                return jax.vmap(splash_kernel)(query,key,value, segment_ids = decoder_segment_ids)
+
+            attn_output = wrap_flash_attention(xq, xk, xv, None)
             attn_output = attn_output.transpose([0, 2, 1, 3])
             attn_output = with_sharding_constraint(attn_output, PS(("dp", "fsdp"), None, "mp", None))
         else:
@@ -827,6 +854,7 @@ class FlaxLLaMABlock(nn.Module):
     dtype: jnp.dtype=jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self) -> None:
         attention_module = FlaxLLaMAAttention
@@ -849,6 +877,7 @@ class FlaxLLaMABlock(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
             precision=self.precision,
+            mesh=self.mesh
         )
         self.feed_forward = mlp_module(
             self.config,
@@ -1064,6 +1093,7 @@ class FlaxLLaMABlockCollection(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self):
         block = FlaxLLaMABlock
@@ -1078,7 +1108,8 @@ class FlaxLLaMABlockCollection(nn.Module):
                 name=str(i),
                 dtype=self.dtype,
                 param_dtype=self.param_dtype,
-                precision=self.precision
+                precision=self.precision,
+                mesh=self.mesh
             ) for i in range(self.config.num_hidden_layers)
         ]
 
@@ -1142,6 +1173,7 @@ class FlaxLLaMAModule(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self):
         self.embed_dim = self.config.hidden_size
@@ -1154,7 +1186,7 @@ class FlaxLLaMAModule(nn.Module):
             param_dtype=self.param_dtype,
         )
         self.dropout = nn.Dropout(rate=self.config.embd_pdrop)
-        self.h = FlaxLLaMABlockCollection(self.config, dtype=self.dtype, param_dtype=self.param_dtype, precision=self.precision)
+        self.h = FlaxLLaMABlockCollection(self.config, dtype=self.dtype, param_dtype=self.param_dtype, precision=self.precision, mesh=self.mesh)
         self.ln_f = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps, dtype=self.dtype, param_dtype=self.param_dtype)
 
     def __call__(
@@ -1218,9 +1250,10 @@ class FlaxLLaMAForCausalLMModule(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self):
-        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype)
+        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype, mesh=self.mesh)
         self.lm_head = nn.Dense(
             self.config.vocab_size,
             dtype=self.dtype,

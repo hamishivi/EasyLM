@@ -64,7 +64,7 @@ def main(argv):
         enable=FLAGS.log_all_worker or (jax.process_index() == 0),
     )
     set_random_seed(FLAGS.seed)
-
+    mesh = LLaMAConfig.get_jax_mesh(FLAGS.mesh_dim)
     tokenizer = LLaMAConfig.get_tokenizer(FLAGS.tokenizer)
     dataset = DatasetFactory.load_dataset(FLAGS.train_dataset, tokenizer)
     if FLAGS.load_dataset_state != '':
@@ -107,7 +107,7 @@ def main(argv):
         llama_config.update(dict(vocab_size=wrapped_dataset.vocab_size))
 
     model = FlaxLLaMAForCausalLMModule(
-        llama_config, dtype=get_float_dtype_by_name(FLAGS.dtype)
+        llama_config, dtype=get_float_dtype_by_name(FLAGS.dtype), mesh=mesh
     )
 
     print("Building optimizer...")
@@ -132,9 +132,9 @@ def main(argv):
     def init_fn(rng):
         rng_generator = JaxRNG(rng)
         params = model.init(
-            input_ids=jnp.zeros((4, seq_length), dtype=jnp.int32),
-            position_ids=jnp.zeros((4, seq_length), dtype=jnp.int32),
-            attention_mask=jnp.ones((4, seq_length), dtype=jnp.int32),
+            input_ids=jnp.zeros((8, seq_length), dtype=jnp.int32),
+            position_ids=jnp.zeros((8, seq_length), dtype=jnp.int32),
+            attention_mask=jnp.ones((8, seq_length), dtype=jnp.int32),
             rngs=rng_generator(llama_config.rng_keys()),
         )
         return TrainState.create(params=params, tx=optimizer, apply_fn=None)
@@ -234,7 +234,7 @@ def main(argv):
             milestone=milestone,
         )
 
-    mesh = LLaMAConfig.get_jax_mesh(FLAGS.mesh_dim)
+    
     with mesh:
         train_state, restored_params = None, None
         if FLAGS.load_checkpoint != '':
