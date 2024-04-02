@@ -12,17 +12,21 @@ sudo apt-get update && sudo apt-get install -y \
     nfs-common \
     golang # needed for jax-smi
 
+# upgrade python
+sudo add-apt-repository ppa:deadsnakes/ppa -y
+sudo apt-get update
+sudo apt-get install -y python3.10 python3.10-dev python3.10-venv
+# fix pip issues
+curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
+
 
 # Python dependencies
 cat > $HOME/tpu_requirements.txt <<- EndOfFile
 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 jax[tpu]==0.4.25
 networkx==3.1
-tensorflow==2.11.0
 flax==0.8.2
 optax==0.1.7
-distrax==0.1.3
-chex==0.1.7
 einops
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.0.1
@@ -46,7 +50,7 @@ gradio
 jax-smi
 EndOfFile
 
-pip install --upgrade -r $HOME/tpu_requirements.txt
+python3.10 -m pip install --upgrade -r $HOME/tpu_requirements.txt
 
 
 # vim configurations
