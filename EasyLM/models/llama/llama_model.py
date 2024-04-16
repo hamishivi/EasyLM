@@ -309,7 +309,7 @@ class LLaMAConfig(PretrainedConfig):
         fcm_max_ratio=0.0,
         rope_theta=10000,
         use_hf_rotary_emb=False,
-        flash_attention=False,
+        flash_attention=True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
