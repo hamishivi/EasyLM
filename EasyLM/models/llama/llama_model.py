@@ -950,6 +950,7 @@ class FlaxLLaMAPreTrainedModel(FlaxPreTrainedModel):
     config_class = LLaMAConfig
     base_model_prefix = "transformer"
     module_class: nn.Module = None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def __init__(
         self,
@@ -960,7 +961,7 @@ class FlaxLLaMAPreTrainedModel(FlaxPreTrainedModel):
         _do_init: bool = True,
         **kwargs,
     ):
-        module = self.module_class(config=config, dtype=dtype, **kwargs)
+        module = self.module_class(config=config, dtype=dtype, mesh=self.mesh, **kwargs)
         super().__init__(config, module, input_shape=input_shape, seed=seed, dtype=dtype, _do_init=_do_init)
 
     def init_weights(self, rng: jax.random.PRNGKey, input_shape: Tuple, params: FrozenDict = None) -> FrozenDict:
@@ -1343,9 +1344,10 @@ class FlaxLLaMAForSequenceClassificationModule(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self):
-        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype)
+        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype, mesh=self.mesh)
         self.score = nn.Dense(
             1,
             dtype=self.dtype,
@@ -1407,9 +1409,10 @@ class FlaxLLaMAForTokenRegressionModule(nn.Module):
     dtype: jnp.dtype = jnp.float32
     param_dtype: jnp.dtype=jnp.float32
     precision: Optional[Union[jax.lax.Precision, str]]=None
+    mesh: Optional[jax.sharding.Mesh] = None # required for flash attention
 
     def setup(self):
-        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype)
+        self.transformer = FlaxLLaMAModule(self.config, dtype=self.dtype, mesh=self.mesh)
         self.score = nn.Dense(
             1,
             dtype=self.dtype,
