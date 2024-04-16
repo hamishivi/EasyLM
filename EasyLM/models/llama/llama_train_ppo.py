@@ -390,10 +390,34 @@ def main(argv):
     if llama_config_reward.vocab_size < wrapped_dataset.vocab_size:
         llama_config_reward.update(dict(vocab_size=wrapped_dataset.vocab_size))
 
-    policy_model = FlaxLLaMAForCausalLM(llama_config_policy, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False, mesh=mesh)
-    value_model = FlaxLLaMAForTokenRegression(llama_config_reward, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False, mesh=mesh)
-    reference_model = FlaxLLaMAForCausalLM(llama_config_policy, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False, mesh=mesh)
-    reward_model = FlaxLLaMAForSequenceClassification(llama_config_reward, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False, mesh=mesh)
+    policy_model = FlaxLLaMAForCausalLM(
+        llama_config_policy,
+        dtype=get_float_dtype_by_name(FLAGS.dtype),
+        _do_init=False,
+        input_shape=(real_batch_size, seq_length),
+        mesh=mesh
+    )
+    value_model = FlaxLLaMAForTokenRegression(
+        llama_config_reward,
+        dtype=get_float_dtype_by_name(FLAGS.dtype),
+        _do_init=False,
+        input_shape=(real_batch_size, seq_length),
+        mesh=mesh
+    )
+    reference_model = FlaxLLaMAForCausalLM(
+        llama_config_policy,
+        dtype=get_float_dtype_by_name(FLAGS.dtype),
+        _do_init=False,
+        input_shape=(real_batch_size, seq_length),
+        mesh=mesh
+    )
+    reward_model = FlaxLLaMAForSequenceClassification(
+        llama_config_reward,
+        dtype=get_float_dtype_by_name(FLAGS.dtype),
+        _do_init=False,
+        input_shape=(real_batch_size, seq_length),
+        mesh=mesh
+    )
 
     print("Building optimizer...")
     FLAGS.optimizer.adamw_optimizer.init_lr = 0.0
