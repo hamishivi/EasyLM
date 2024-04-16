@@ -699,7 +699,7 @@ class FlaxLLaMAAttention(nn.Module):
                 prevent_cse=True,
             )
             attn_output = with_sharding_constraint(attn_output, PS(("dp", "fsdp"), None, "mp", None))
-        elif self.config.flash_attention:
+        elif self.config.flash_attention and not (self.has_variable("cache", "cached_key") or init_cache):
             assert self.mesh is not None, "mesh must be provided for flash attention"
             # import
             from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
@@ -1016,7 +1016,7 @@ class FlaxLLaMAPreTrainedModel(FlaxPreTrainedModel):
         init_variables = self.module.init(
             jax.random.PRNGKey(0), input_ids, attention_mask, position_ids, return_dict=False, init_cache=True
         )
-        return init_variables["cache"]
+        return unfreeze(init_variables["cache"])
 
     @add_start_docstrings_to_model_forward("")
     def __call__(
