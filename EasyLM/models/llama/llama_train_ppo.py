@@ -408,9 +408,9 @@ def main(argv):
     def init_fn_policy(rng):
         rng_generator = JaxRNG(rng)
         params = policy_model.module.init(
-            input_ids=jnp.zeros((4, seq_length), dtype=jnp.int32),
-            position_ids=jnp.zeros((4, seq_length), dtype=jnp.int32),
-            attention_mask=jnp.ones((4, seq_length), dtype=jnp.int32),
+            input_ids=jnp.zeros((real_batch_size, seq_length), dtype=jnp.int32),
+            position_ids=jnp.zeros((real_batch_size, seq_length), dtype=jnp.int32),
+            attention_mask=jnp.ones((real_batch_size, seq_length), dtype=jnp.int32),
             rngs=rng_generator(llama_config_policy.rng_keys()),
         )
         return TrainState.create(params=params, tx=policy_optimizer, apply_fn=None)
@@ -434,9 +434,9 @@ def main(argv):
     def init_fn_reward(rng):
         rng_generator = JaxRNG(rng)
         params = reward_model.module.init(
-            input_ids=jnp.zeros((4, seq_length), dtype=jnp.int32),
-            position_ids=jnp.zeros((4, seq_length), dtype=jnp.int32),
-            attention_mask=jnp.ones((4, seq_length), dtype=jnp.int32),
+            input_ids=jnp.zeros((real_batch_size, seq_length), dtype=jnp.int32),
+            position_ids=jnp.zeros((real_batch_size, seq_length), dtype=jnp.int32),
+            attention_mask=jnp.ones((real_batch_size, seq_length), dtype=jnp.int32),
             rngs=rng_generator(llama_config_reward.rng_keys()),
         )
         return TrainState.create(params=params, tx=value_optimizer, apply_fn=None)
