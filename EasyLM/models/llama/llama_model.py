@@ -257,7 +257,21 @@ LLAMA_STANDARD_CONFIGS = {
         'rms_norm_eps': 1e-6,
         'use_cache': True,
         'tie_word_embeddings': False,
-        'flash_attention': True,
+        'scan_attention': True,
+        'scan_mlp': True,
+        'flash_attention': False,
+        # block parameters, we can play with for memory/perf.
+        # larger blocks = faster, but more memory
+        # remats = slower backward pass, but less mem
+        # official repo has 2x for key chunk size.
+        'scan_query_chunk_size': 1024,
+        'scan_key_chunk_size': 1024,
+        'scan_mlp_chunk_size': 1024,
+        # mlp/attn rec. is nothing_saveable
+        # remat goes crazy, saves alot of mem.
+        'remat_block': '',
+        'remat_attention': 'nothing_saveable',
+        'remat_mlp': 'nothing_saveable',
     },
 }
 
@@ -327,14 +341,14 @@ class LLaMAConfig(PretrainedConfig):
         embd_pdrop=0.0,
         attn_pdrop=0.0,
         tie_word_embeddings=False,
-        remat_block='',
-        remat_attention='',
-        remat_mlp='',
+        remat_block='nothing_saveable',
+        remat_attention='nothing_saveable',
+        remat_mlp='nothing_saveable',
         scan_attention=False,
         scan_mlp=False,
-        scan_query_chunk_size=1024,
+        scan_query_chunk_size=512,
         scan_key_chunk_size=1024,
-        scan_mlp_chunk_size=1024,
+        scan_mlp_chunk_size=512,
         fcm_min_ratio=0.0,
         fcm_max_ratio=0.0,
         rope_theta=10000,
@@ -952,7 +966,8 @@ class FlaxLLaMABlock(nn.Module):
 
         feed_forward_input = self.ffn_norm(hidden_states)
 
-        if self.config.scan_mlp:
+        # again, no blockwise attention during decoding.
+        if self.config.scan_mlp and not (self.attention.has_variable("cache", "cached_key") or init_cache):
             feed_forward_hidden_states = blockwise_ffn(
                 self.feed_forward,
                 feed_forward_input,
