@@ -340,6 +340,7 @@ def main(argv):
         dataset.load_state_dict(mlxu.load_pickle(FLAGS.load_dataset_state))
     wrapped_dataset = dataset.dataset if isinstance(dataset, torch.utils.data.DataLoader) else dataset
 
+    real_batch_size = FLAGS.mini_batch_size
     prompt_batch_size = wrapped_dataset.config.batch_size
     steps_per_epoch = len(wrapped_dataset) // prompt_batch_size
     steps_per_epoch = steps_per_epoch if FLAGS.max_steps_per_epoch == 0 else min(steps_per_epoch, FLAGS.max_steps_per_epoch)
