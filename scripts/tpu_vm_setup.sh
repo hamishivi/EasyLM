@@ -27,7 +27,7 @@ einops
 torch==2.0.1
 transformers==4.31.0
 datasets==2.16.1
-huggingface_hub
+huggingface_hub==0.19.4
 tqdm
 h5py
 ml_collections
