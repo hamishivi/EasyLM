@@ -212,6 +212,7 @@ def write_model(loaded, model_path, model_size, is_reward_model=False):
         num_hidden_layers=params["n_layers"],
         rms_norm_eps=params["norm_eps"],
         num_key_value_heads=params.get("n_kv_heads", params["n_heads"]),
+        max_position_embeddings=4096,
     )
     # Set the number of labels to 1 for reward models.
     if is_reward_model:
