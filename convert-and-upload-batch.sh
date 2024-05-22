@@ -27,7 +27,8 @@ IFS=',' read -r MODEL_PATH MODEL_NAME <<< "$tuple"
     # parse beaker id from log. Format: Uploading <name> to <id>
     BEAKER_ID=$(awk '/Uploading/ {print $4}' tmp.log)
 
-    echo  "${MODEL_NAME} uploaded to beaker with id ${BEAKER_ID}
+    echo  "${MODEL_NAME} uploaded to beaker with id ${BEAKER_ID}"
 
     # cleanup
     rm -rf tmp
+done
