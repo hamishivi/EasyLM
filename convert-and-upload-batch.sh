@@ -20,7 +20,7 @@ IFS=',' read -r MODEL_PATH MODEL_NAME <<< "$tuple"
 
     gsutil cp gs://hamishi-east1/easylm/llama/tokenizer.model tokenizer.model
 
-    python -m EasyLM.models.llama.convert_easylm_to_hf --load_checkpoint=params::${MODEL_PATH} --tokenizer_path='tokenizer.model' --model_size=${MODEL_SIZE} --output_dir=tmp
+    python -m EasyLM.models.llama.convert_easylm_to_hf --load_checkpoint=params::${MODEL_PATH} --tokenizer_path='tokenizer.model' --model_size='7b' --output_dir=tmp
 
     beaker dataset create tmp --name ${MODEL_NAME} --workspace ai2/modular_adaptation &> tmp.log
 
