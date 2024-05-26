@@ -29,7 +29,7 @@ from EasyLM.jax_utils import (
 )
 
 
-LLAMA_STANDARD_CONFIGS = {
+OLMO_STANDARD_CONFIGS = {
     '7b': {
         'vocab_size': 50304,
         'hidden_size': 4096,
@@ -250,8 +250,8 @@ class OLMoConfig(PretrainedConfig):
 
     @classmethod
     def load_config(cls, path):
-        if path in LLAMA_STANDARD_CONFIGS:
-            return cls.from_dict(LLAMA_STANDARD_CONFIGS[path])
+        if path in OLMO_STANDARD_CONFIGS:
+            return cls.from_dict(OLMO_STANDARD_CONFIGS[path])
         load_type, load_path = path.split('::', 1)
         if load_type == 'pickle':
             return cls.from_dict(load_pickle(load_path)['olmo_config'])
