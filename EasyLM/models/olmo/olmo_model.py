@@ -12,8 +12,8 @@ from flax.linen import combine_masks, make_causal_mask
 from flax.linen.attention import dot_product_attention_weights
 from flax.traverse_util import flatten_dict, unflatten_dict
 from flax.linen import partitioning as nn_partitioning
-from hf_olmo import OLMoTokenizerFast
 
+from transformers import GPTNeoXTokenizerFast
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from transformers.modeling_flax_outputs import FlaxBaseModelOutput, FlaxCausalLMOutput
@@ -34,13 +34,26 @@ LLAMA_STANDARD_CONFIGS = {
         'vocab_size': 50304,
         'hidden_size': 4096,
         'intermediate_size': 11008,
-        'num_hidden_layers': 2,
+        'num_hidden_layers': 32,
         'num_attention_heads': 32,
         'max_sequence_length': 2048,
         'initializer_range': 0.02,
         'rms_norm_eps': 1e-5,
         'use_cache': True,
         'tie_word_embeddings': False,
+    },
+    '17_7b': {
+        'vocab_size': 50304,
+        'hidden_size': 4096,
+        'intermediate_size': 11008,
+        'num_hidden_layers': 32,
+        'num_attention_heads': 32,
+        'max_sequence_length': 4096,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+        "clip_qkv": 8.0
     },
     'debug': { # A small model for debugging
         'vocab_size': 50304,
@@ -120,6 +133,7 @@ class OLMoConfig(PretrainedConfig):
         resid_pdrop=0.0,
         embd_pdrop=0.0,
         attn_pdrop=0.0,
+        clip_qkv=None,
         tie_word_embeddings=False,
         remat_block='',
         remat_attention='',
@@ -147,6 +161,7 @@ class OLMoConfig(PretrainedConfig):
         self.resid_pdrop = resid_pdrop
         self.embd_pdrop = embd_pdrop
         self.attn_pdrop = attn_pdrop
+        self.clip_qkv = clip_qkv
         self.remat_block = remat_block
         self.remat_attention = remat_attention
         self.remat_mlp = remat_mlp
@@ -312,9 +327,9 @@ class RotaryEmbedding(nn.Module):
     def setup(self):
         self.pos_sin, self.pos_cos = self.get_rotary_embedding(self.config.max_sequence_length)
 
-    def get_rotary_embedding(self, seq_len: int):
+    def get_rotary_embedding(self, seq_len: int, rope_theta: float = 10000):
         dim = self.config.hidden_size // self.config.num_attention_heads
-        inv_freq = 1.0 / (10000 ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim))
+        inv_freq = 1.0 / (rope_theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim))
         seq = jnp.arange(seq_len, dtype=jnp.float32)
         
         freqs = jnp.einsum("i , j -> i j", seq, inv_freq)
@@ -472,6 +487,12 @@ class FlaxOLMoAttention(nn.Module):
         xq = with_sharding_constraint(xq, PS(("dp", "fsdp"), None, "mp"))
         xk = with_sharding_constraint(xk, PS(("dp", "fsdp"), None, "mp"))
         xv = with_sharding_constraint(xv, PS(("dp", "fsdp"), None, "mp"))
+
+        # olmo 1.7 uses qkv clipping
+        if self.config.clip_qkv is not None:
+            xq = jnp.clip(xq, -self.config.clip_qkv, self.config.clip_qkv)
+            xk = jnp.clip(xk, -self.config.clip_qkv, self.config.clip_qkv)
+            xv = jnp.clip(xv, -self.config.clip_qkv, self.config.clip_qkv)
 
         xq = self._split_heads(xq, self.num_heads)
         xk = self._split_heads(xk, self.num_key_value_heads)
@@ -969,13 +990,6 @@ class FlaxOLMoModule(nn.Module):
         output_hidden_states: bool = False,
         return_dict: bool = True,
     ):
-        
-        input_ids = np.array([[26170, 14053,   310,   209]])
-        input_ids = input_ids.repeat(4, 0)
-        attention_mask = np.ones(input_ids.shape)
-        position_ids = np.arange(4)[None, :]
-        position_ids = position_ids.repeat(4, 0)
-
         input_embeds = self.wte(input_ids.astype("i4"))
         hidden_states = self.dropout(input_embeds, deterministic=deterministic)
 
@@ -1254,7 +1268,7 @@ PRETRAINED_VOCAB_FILES_MAP = {}
 
 
 # really simple wrapper class to add the encode method
-class OlmoTokenizer(OLMoTokenizerFast):
+class OlmoTokenizer(GPTNeoXTokenizerFast):
     def encode(self, text):
         return self(text).input_ids
 
@@ -1265,9 +1279,9 @@ if __name__ == '__main__':
     from EasyLM.checkpoint import StreamingCheckpointer
     from EasyLM.jax_utils import JaxRNG, next_rng
     import torch
-    tokenizer = AutoTokenizer.from_pretrained('CodeLlama-34b-hf')
-    hf_model = AutoModelForCausalLM.from_pretrained('CodeLlama-34b-hf')
-    olmo_config = OLMoConfig.load_config('30b2')
+    tokenizer = AutoTokenizer.from_pretrained('allenai/OLMo-1.7-7B-hf')
+    hf_model = AutoModelForCausalLM.from_pretrained('allenai/OLMo-1.7-7B-hf')
+    olmo_config = OLMoConfig.load_config('17_7b')
     jax_model = FlaxOLMoForCausalLMModule(
         olmo_config, dtype=jnp.float32
     )
@@ -1275,9 +1289,10 @@ if __name__ == '__main__':
         StreamingCheckpointer.get_default_config(), 'output',
         enable=jax.process_index() == 0,
     )
-    _, restored_params = checkpointer.load_trainstate_checkpoint('params::codeolmo_30b')
+    _, restored_params = checkpointer.load_trainstate_checkpoint('params::olmo_17_7b_hf')
     inputs = tokenizer("What is 2+2?", return_tensors='jax').input_ids
     hf_logits = hf_model(torch.tensor(np.array(inputs))).logits
     jax_logits = jax_model.apply(
         restored_params, inputs, deterministic=True,
     ).logits
+    import pdb; pdb.set_trace()
