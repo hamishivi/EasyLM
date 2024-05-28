@@ -1,14 +1,14 @@
 set -ex
 
 model_list=(
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all-coding_20/dcf31467524d4d92805185985fb86054/streaming_params_19164,llama_2_7b-tulu_all-coding_20"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all-coding_40/65c07cec8f67468f9c000512ffafcd2c/streaming_params_21120,llama_2_7b-tulu_all-coding_40"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all-coding_60/f08ddd32d84a4e1a993b953a468347c5/streaming_params_23076,llama_2_7b-tulu_all-coding_60"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all-coding_80/e29c30ebdd9a4306b4f874fee788e85a/streaming_params_25034,llama_2_7b-tulu_all-coding_80"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b-tulu_match-coding_20/8bf9279c80e54e5482d08cc9d956588e/streaming_params_7822,tulu_2_7b-tulu_match-coding_20"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b-tulu_match-coding_40/21529fc8082c4707a56c2a20fafc7e63/streaming_params_15648,tulu_2_7b-tulu_match-coding_40"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b-tulu_match-coding_60/14c4aeb80eba4212a20c46c30a029a03/streaming_params_11736,tulu_2_7b-tulu_match-coding_60"
-    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b-tulu_match-coding_80/a11285e5fae14f838acc37c0e0153f15/streaming_params_15648,tulu_2_7b-tulu_match-coding_80"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all_with_coding-coding_20/98a737fa602d497e856e093867ef6c50/streaming_params_40828,llama_2_7b-tulu_all_with_coding-coding_20"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all_with_coding-coding_40/5235e100f0764902831ab35875c37181/streaming_params_22370,llama_2_7b-tulu_all_with_coding-coding_40"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all_with_coding-coding_60/35a84ced077044048a4442a8ffa06082/streaming_params_24326,llama_2_7b-tulu_all_with_coding-coding_60"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/llama_2_7b-tulu_all_with_coding-coding_80/f1c63875b5ec475ebaa5ee54e6ecacec/streaming_params_26284,llama_2_7b-tulu_all_with_coding-coding_80"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b_with_coding-tulu_match-coding_20/71b53b25a48c48f1957da4d6d014bb05/streaming_params_3912,tulu_2_7b_with_coding-tulu_match-coding_20"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b_with_coding-tulu_match-coding_40/3a3b886aa57a4fe2bcc38b680b93bdca/streaming_params_7824,tulu_2_7b_with_coding-tulu_match-coding_40"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b_with_coding-tulu_match-coding_60/8f6ab65d127047fb9793ab7984909717/streaming_params_11736,tulu_2_7b_with_coding-tulu_match-coding_60"
+    "gs://jacobm-bucket/modular_adaptation/checkpoints/consistent_mix/tulu_2_7b_with_coding-tulu_match-coding_80/f56c99abf12d4d2e84b922ac1a4efca2/streaming_params_15648,tulu_2_7b_with_coding-tulu_match-coding_80"
 )
 
 for tuple in "${model_list[@]}"
