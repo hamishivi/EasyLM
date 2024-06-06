@@ -550,6 +550,7 @@ class JsonTorchDataset(object):
         config.batch_size = 8
         config.num_workers = 8
         config.remove_truncated_samples = False
+        config.add_bos_token = False
 
         if updates is not None:
             config.update(ConfigDict(updates).copy_and_resolve_references())
@@ -830,6 +831,8 @@ class TuluPromptDataset(JsonTorchDataset):
             return message_text
     
         prompt = _concat_messages_to_prompt(messages)
+        if self.config.add_bos_token:
+            prompt = self.tokenizer.bos_token + prompt
         prompt_tok = self.tokenizer(prompt, max_length=self.config.seq_length, padding='max_length', truncation='longest_first')
         return {
             "prompt_input_ids": np.array(prompt_tok.input_ids, dtype=np.int32),
