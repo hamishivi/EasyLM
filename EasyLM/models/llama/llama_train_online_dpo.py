@@ -60,124 +60,53 @@ FLAGS, FLAGS_DEF = mlxu.define_flags_with_default(
     log_all_worker=False,
 
     max_continuation_len=16,
-    mini_batch_size=1, # must be a divisor of (batch_size x rollouts_per_prompt), and a multiple of (dp x fsdp) dimensions
+    mini_batch_size=1, # must be a divisor of (batch_size x 2), and a multiple of (dp x fsdp) dimensions
     use_tpu=False,
     # relatively dynamic flags
     num_epochs=1,
     ppo_epochs=4,
-    rollouts_per_prompt=1,
     warmup_epochs=0.0,
-    policy_freeze_epochs=0.0,
-    lr=1e-5,
-    kl_coef=0.2,
+    lr=5e-7,
+    beta=0.1,
     reward_gain=1.0,
     reward_bias=0.0,
     # relatively static flags
     temperature=0.7,
-    whiten_rewards=False,
-    gamma=1.0,
-    lam=0.95,
-    cliprange=0.2,
-    cliprange_value=0.2,
-    vf_coef=0.1,
     # debugging flags
     max_steps_per_epoch=0,
     generate_only=False,
 )
 
-
-def masked_sum(x, mask, axis=None):
-    if axis is None:
-        return jnp.sum(x * mask)
-    else:
-        return jnp.sum(x * mask, axis=axis)
-
-def masked_mean(x, mask, axis=None):
-    if axis is None:
-        return jnp.sum(x * mask) / jnp.sum(mask)
-    else:
-        return jnp.sum(x * mask, axis=axis) / jnp.sum(mask, axis=axis)
-
-def masked_var(x, mask, unbiased=True):
-    mean = masked_mean(x, mask)
-    centered_values = x - mean
-    variance = masked_mean(jnp.square(centered_values), mask)
-    if unbiased:
-        mask_sum = jnp.sum(mask)
-        bessel_correction = mask_sum / (mask_sum - 1)
-        variance = variance * bessel_correction
-    return variance
-
-def whiten(x, mask, shift_mean=True):
-    mean, var = masked_mean(x, mask), masked_var(x, mask)
-    whitened = (x - mean) / jnp.sqrt(var + 1e-6)
-    if not shift_mean:
-        whitened += mean
-    return whitened
-
 def detach(x):
     return jax.lax.stop_gradient(x)
 
 
-def ppo_loss(
-    policy_model, value_model,
-    policy_params, value_params,
-    rng,
-    input_ids, attn_mask, cont_input_ids, cont_attn_mask, old_cont_logps, old_cont_values, advantages, returns,
-):
-    rng_generator = JaxRNG(rng)
+def dpo_loss(policy_chosen_logps: torch.FloatTensor,
+             policy_rejected_logps: torch.FloatTensor,
+             reference_chosen_logps: torch.FloatTensor,
+             reference_rejected_logps: torch.FloatTensor,
+             beta: float,
+             label_smoothing: float = 0.0,
+             use_ipo: bool = False,):
+    # modified from https://arxiv.org/pdf/2305.18290.pdf
+    # also https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py#L375
+    pi_logratios = policy_chosen_logps - policy_rejected_logps
+    ref_logratios = reference_chosen_logps - reference_rejected_logps
+    logits = pi_logratios - ref_logratios
 
-    PL = input_ids.shape[1] - cont_input_ids.shape[1]
+    # from https://github.com/eric-mitchell/direct-preference-optimization/blob/main/trainers.py
+    if use_ipo:
+        # Eq. 17 of https://arxiv.org/pdf/2310.12036v2.pdf
+        losses = (logits - 1/(2 * beta)) ** 2
+    else:
+        # Eq. 3 https://ericmitchell.ai/cdpo.pdf;
+        # label_smoothing=0 gives original DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
+        losses = -jax.nn.log_sigmoid(beta * logits) * (1 - label_smoothing) - jax.nn.log_sigmoid(-beta * logits) * label_smoothing
 
-    # run forward pass on policy
-    new_cont_logits = policy_model(input_ids, attn_mask, params=policy_params['params'], dropout_rng=rng_generator()).logits[:, PL-1:-1, :] # (B, CL, V)
-    new_cont_logps = jnp.take_along_axis(jax.nn.log_softmax(new_cont_logits, axis=-1), cont_input_ids[:, :, None], axis=-1).squeeze(-1) # (B, CL)
+    chosen_rewards = beta * jax.lax.stop_gradient(policy_chosen_logps - reference_chosen_logps)
+    rejected_rewards = beta * jax.lax.stop_gradient(policy_rejected_logps - reference_rejected_logps)
 
-    ratio = jnp.exp(new_cont_logps - old_cont_logps)
-    pg_losses = -advantages * ratio # (B, CL)
-    pg_losses2 = -advantages * jnp.clip(ratio, 1.0 - FLAGS.cliprange, 1.0 + FLAGS.cliprange) # (B, CL)
-    pg_loss = masked_mean(jnp.maximum(pg_losses, pg_losses2), cont_attn_mask)
-
-    # run forward pass on value
-    new_cont_values = value_model(input_ids, attn_mask, params=value_params['params'], dropout_rng=rng_generator()).logits[:, PL-1:-1] # (B, CL)
-
-    new_cont_values_clipped = old_cont_values + jnp.clip(new_cont_values - old_cont_values, -FLAGS.cliprange_value, FLAGS.cliprange_value)
-    vf_losses1 = jnp.square(new_cont_values - returns) # (B, CL)
-    vf_losses2 = jnp.square(new_cont_values_clipped - returns) # (B, CL)
-    vf_loss = 0.5 * masked_mean(jnp.maximum(vf_losses1, vf_losses2), cont_attn_mask)
-
-    loss = pg_loss + FLAGS.vf_coef * vf_loss
-
-    stats = {
-        'ppo/loss/policy': detach(pg_loss),
-        'ppo/loss/value': detach(vf_loss),
-        'ppo/loss/total': detach(loss),
-        'ppo/policy/ratios_mean': detach(masked_mean(ratio, cont_attn_mask)),
-        'ppo/policy/advantages_mean': detach(masked_mean(advantages, cont_attn_mask)),
-        'ppo/returns/mean': detach(masked_mean(returns, cont_attn_mask)),
-        'ppo/val/vpred': detach(masked_mean(new_cont_values, cont_attn_mask)),
-        'ppo/val/error': detach(masked_mean(jnp.square(new_cont_values - returns), cont_attn_mask)),
-        'ppo/val/mean': detach(masked_mean(old_cont_values, cont_attn_mask)),
-    }
-    return loss, stats
-
-def compute_advantages(values, rewards, mask):
-    lastgaelam = 0
-    advantages_reversed = []
-    gen_len = mask.shape[1]
-    values = values * mask
-    rewards = rewards * mask
-    if FLAGS.whiten_rewards:
-        rewards = whiten(rewards, mask, shift_mean=False)
-    for t in reversed(range(gen_len)):
-        nextvalues = values[:, t + 1] if t < gen_len - 1 else jnp.zeros_like(values[:, t])
-        delta = rewards[:, t] + FLAGS.gamma * nextvalues - values[:, t]
-        lastgaelam = delta + FLAGS.gamma * FLAGS.lam * lastgaelam
-        advantages_reversed.append(lastgaelam)
-    advantages = jnp.stack(advantages_reversed[::-1], axis=1)
-    returns = advantages + values
-    advantages = whiten(advantages, mask, shift_mean=True)
-    return advantages, returns
+    return losses, chosen_rewards, rejected_rewards
 
 def ppo_rollout(
     policy_train_state,
@@ -231,9 +160,9 @@ def ppo_rollout(
 
     return rng_generator(), batch
 
-def ppo_forward_backward(
-    policy_train_state, reference_params, value_train_state, reward_params,
-    policy_model, reference_model, value_model, reward_model,
+def dpo_forward_backward(
+    policy_params, reference_params, reward_params,
+    policy_model, reference_model, reward_model,
     rng, batch, tokenizer,
 ):
     rng_generator = JaxRNG(rng)
@@ -258,65 +187,51 @@ def ppo_forward_backward(
     score = reward * FLAGS.reward_gain + FLAGS.reward_bias # (B)
     score = jax.lax.stop_gradient(score)
 
+    # reshape into adjacent pairs
+    score_pairs = score.reshape(score.shape[0] // 2, 2)
+    # get chosen mask (True when idx 1 works)
+    chosen_mask = score_pairs[:, 1] > score_pairs[:, 0]
+
     # run forward pass on policy
-    cont_logits = policy_model(input_ids, attn_mask, params=policy_train_state.params['params'], dropout_rng=rng_generator()).logits[:, PL-1:-1, :] # (B, CL, V)
+    cont_logits = policy_model(input_ids, attn_mask, params=policy_params, dropout_rng=rng_generator()).logits[:, PL-1:-1, :] # (B, CL, V)
     cont_logps = jnp.take_along_axis(jax.nn.log_softmax(cont_logits, axis=-1), cont_input_ids[:, :, None], axis=-1).squeeze(-1) # (B, CL)
-    cont_logps = jax.lax.stop_gradient(cont_logps)
+    # split our logps into pairs
+    cont_logps_pairs = cont_logps.reshape(cont_logps.shape[0] // 2, 2, cont_logps.shape[1])
 
     # run forward pass on reference
     cont_ref_logits = reference_model(input_ids, attn_mask, params=reference_params['params'], dropout_rng=rng_generator()).logits[:, PL-1:-1, :] # (B, CL, V)
     cont_ref_logps = jnp.take_along_axis(jax.nn.log_softmax(cont_ref_logits, axis=-1), cont_input_ids[:, :, None], axis=-1).squeeze(-1) # (B, CL)
     cont_ref_logps = jax.lax.stop_gradient(cont_ref_logps)
+    # split our logps into pairs
+    cont_ref_logps_pairs = cont_ref_logps.reshape(cont_ref_logps.shape[0] // 2, 2, cont_ref_logps.shape[1])
 
-    # run forward pass on value
-    cont_values = value_model(input_ids, attn_mask, params=value_train_state.params['params'], dropout_rng=rng_generator()).logits[:, PL-1:-1] # (B, CL)
-    cont_values = jax.lax.stop_gradient(cont_values)
-
-    # penalize rewards
-    kl = cont_logps - cont_ref_logps # (B, CL)
-    kl = jax.lax.stop_gradient(kl)
-    non_score_rewards = -FLAGS.kl_coef * kl # (B, CL)
-    non_score_rewards = jax.lax.stop_gradient(non_score_rewards)
-    cont_last_token_index = jnp.argmax(cont_position_ids, axis=1) # (B)
-    rewards = non_score_rewards.at[jnp.arange(input_ids.shape[0]), cont_last_token_index].add(score) # (B, CL)
-    rewards = jax.lax.stop_gradient(rewards)
-
-    # compute advantages
-    advantages, returns = compute_advantages(cont_values, rewards, cont_attn_mask) # (B, CL), (B, CL)
-    advantages = jax.lax.stop_gradient(advantages)
-    returns = jax.lax.stop_gradient(returns)
-
-    batch.update({
-        'reward': detach(reward),
-    })
-    stats = {
-        'env/reward_mean': detach(jnp.mean(reward)),
-        'objective/kl': detach(jnp.mean(masked_sum(kl, cont_attn_mask, axis=1))),
-        'objective/kl_per_token': detach(masked_mean(kl, cont_attn_mask)),
-        'objective/kl_coef': FLAGS.kl_coef,
-        'ppo/mean_score_total': detach(jnp.mean(masked_sum(rewards, cont_attn_mask, axis=1))),
-        'ppo/mean_non_score_reward': detach(masked_mean(non_score_rewards, cont_attn_mask)),
-        'ppo/mean_non_score_reward_sum': detach(jnp.mean(masked_sum(non_score_rewards, cont_attn_mask, axis=1))),
-        'ppo/mean_scores': detach(jnp.mean(score)),
-        'ppo/std_scores': detach(jnp.std(score)),
-        'tokens/responses_len_mean': detach(jnp.mean(jnp.sum(cont_attn_mask, axis=1))),
-    }
-
-    loss_fn = lambda policy_params, value_params: ppo_loss(
-        policy_model, value_model,
-        policy_params, value_params,
-        rng_generator(),
-        input_ids, attn_mask, cont_input_ids, cont_attn_mask, cont_logps, cont_values, advantages, returns,
+    # split our logps into chosen and rejected
+    # since they are paired, is just a patter of which idx is chosen
+    policy_chosen_logps = jnp.where(chosen_mask[:, None], cont_logps_pairs[:, 1], cont_logps_pairs[:, 0])
+    policy_rejected_logps = jnp.where(chosen_mask[:, None], cont_logps_pairs[:, 0], cont_logps_pairs[:, 1])
+    reference_chosen_logps = jnp.where(chosen_mask[:, None], cont_ref_logps_pairs[:, 1], cont_ref_logps_pairs[:, 0])
+    reference_rejected_logps = jnp.where(chosen_mask[:, None], cont_ref_logps_pairs[:, 0], cont_ref_logps_pairs[:, 1])
+    
+    # dpo loss
+    losses, chosen_rewards, rejected_rewards = dpo_loss(
+        policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps,
+        beta=FLAGS.beta,
     )
-    grad_fn = jax.value_and_grad(loss_fn, argnums=[0, 1], has_aux=True)
-    (_, new_stats), (policy_grads, value_grads) = grad_fn(policy_train_state.params, value_train_state.params)
-    policy_train_state = policy_train_state.apply_gradients(grads=policy_grads)
-    value_train_state = value_train_state.apply_gradients(grads=value_grads)
 
-    stats.update(new_stats)
-    batch = with_sharding_constraint(batch, PS())
+    # get the scores for the pairs
+    chosen_scores = jnp.where(chosen_mask, score_pairs[:, 1], score_pairs[:, 0])
+    rejected_scores = jnp.where(chosen_mask, score_pairs[:, 0], score_pairs[:, 1])
 
-    return policy_train_state, value_train_state, rng_generator(), batch, stats
+    stats = {
+        'odpo/losses': detach(jnp.mean(losses)),
+        'odpo/chosen_logp_rewards': detach(jnp.mean(chosen_rewards)),
+        'odpo/rejected_logp_rewards': detach(jnp.mean(rejected_rewards)),
+        'odpo/margin': detach(jnp.mean(chosen_rewards - rejected_rewards)),
+        'tokens/responses_len_mean': detach(jnp.mean(jnp.sum(cont_attn_mask, axis=1))),
+        'odpo/chosen_scores': detach(jnp.mean(chosen_scores)),
+        'odpo/rejected_scores': detach(jnp.mean(rejected_scores)),
+    }
+    return losses.mean(), stats
 
 
 def main(argv):
@@ -342,13 +257,13 @@ def main(argv):
     steps_per_epoch = len(wrapped_dataset) // prompt_batch_size
     steps_per_epoch = steps_per_epoch if FLAGS.max_steps_per_epoch == 0 else min(steps_per_epoch, FLAGS.max_steps_per_epoch)
     total_steps = FLAGS.num_epochs * steps_per_epoch
-    completion_batch_size = prompt_batch_size * FLAGS.rollouts_per_prompt
+    completion_batch_size = prompt_batch_size * 2
+    assert FLAGS.mini_batch_size % 2 == 0, "mini_batch_size must be a multiple of 2"
     assert completion_batch_size % (FLAGS.mini_batch_size * FLAGS.optimizer.accumulate_gradient_steps) == 0
     grad_updates_per_step = completion_batch_size // (FLAGS.mini_batch_size * FLAGS.optimizer.accumulate_gradient_steps) * FLAGS.ppo_epochs
     grad_updates_per_epoch = steps_per_epoch * grad_updates_per_step
     total_grad_updates = total_steps * grad_updates_per_step
     lr_warmup_grad_updates = math.ceil(FLAGS.warmup_epochs * grad_updates_per_epoch)
-    policy_freeze_grad_updates = math.ceil(FLAGS.policy_freeze_epochs * grad_updates_per_epoch)
     seq_length = wrapped_dataset.seq_length + FLAGS.max_continuation_len
     print(f'len(wrapped_dataset)={len(wrapped_dataset)}')
     print(f'prompt_batch_size={prompt_batch_size}')
@@ -359,7 +274,6 @@ def main(argv):
     print(f'grad_updates_per_epoch={grad_updates_per_epoch}')
     print(f'total_grad_updates={total_grad_updates}')
     print(f'lr_warmup_grad_updates={lr_warmup_grad_updates}')
-    print(f'policy_freeze_grad_updates={policy_freeze_grad_updates}')
 
     print("Building model...")
     if FLAGS.load_llama_config_policy != '':
@@ -389,7 +303,6 @@ def main(argv):
         llama_config_reward.update(dict(vocab_size=wrapped_dataset.vocab_size))
 
     policy_model = FlaxLLaMAForCausalLM(llama_config_policy, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False)
-    value_model = FlaxLLaMAForTokenRegression(llama_config_reward, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False)
     reference_model = FlaxLLaMAForCausalLM(llama_config_policy, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False)
     reward_model = FlaxLLaMAForSequenceClassification(llama_config_reward, dtype=get_float_dtype_by_name(FLAGS.dtype), _do_init=False)
 
@@ -398,8 +311,6 @@ def main(argv):
     FLAGS.optimizer.adamw_optimizer.lr = FLAGS.lr
     FLAGS.optimizer.adamw_optimizer.end_lr = FLAGS.lr
     FLAGS.optimizer.adamw_optimizer.lr_warmup_steps = lr_warmup_grad_updates
-    value_optimizer, value_optimizer_info = OptimizerFactory.get_optimizer(FLAGS.optimizer)
-    FLAGS.optimizer.adamw_optimizer.lr_freeze_steps = policy_freeze_grad_updates
     policy_optimizer, policy_optimizer_info = OptimizerFactory.get_optimizer(FLAGS.optimizer)
 
     print("Initializing training state and pjitting...")
@@ -437,22 +348,17 @@ def main(argv):
             attention_mask=jnp.ones((4, seq_length), dtype=jnp.int32),
             rngs=rng_generator(llama_config_reward.rng_keys()),
         )
-        return TrainState.create(params=params, tx=value_optimizer, apply_fn=None)
-    def create_trainstate_from_params_reward(params):
-        return TrainState.create(params=params, tx=value_optimizer, apply_fn=None)
+        # I construct a train state, but later we will just use the params.
+        return TrainState.create(params=params, tx=policy_optimizer, apply_fn=None)
     train_state_shapes_reward = jax.eval_shape(init_fn_reward, next_rng()) # .params = {'params': {'transformer', 'lm_head'}} => .params = {'transformer', 'lm_head'}
+    # TODO: do the partition rules correctly apply when you only return the params?
+    # something might break...
     train_state_partition_reward = match_partition_rules(LLaMAConfig.get_partition_rules(), train_state_shapes_reward)
-    shard_fns_reward, gather_fns_reward = make_shard_and_gather_fns(train_state_partition_reward, train_state_shapes_reward)
+    shard_fns_reward, _ = make_shard_and_gather_fns(train_state_partition_reward, train_state_shapes_reward)
     sharded_init_fn_reward = pjit(
         init_fn_reward,
         in_shardings=PS(),
         out_shardings=train_state_partition_reward,
-    )
-    sharded_create_trainstate_from_params_reward = pjit(
-        create_trainstate_from_params_reward,
-        in_shardings=(train_state_partition_reward.params, ),
-        out_shardings=train_state_partition_reward,
-        donate_argnums=(0, ),
     )
 
     def ppo_rollout_wrapper(
@@ -470,27 +376,34 @@ def main(argv):
         out_shardings=(PS(), PS()),
         donate_argnums=(1,),  # rng
     )
-    def ppo_forward_backward_wrapper(
-        policy_train_state, reference_params, value_train_state, reward_params,
+    def dpo_forward_backward_wrapper(
+        policy_train_state, reference_params, reward_params,
         rng, batch,
     ):
-        return ppo_forward_backward(
-            policy_train_state, reference_params, value_train_state, reward_params,
-            policy_model, reference_model, value_model, reward_model,
-            rng, batch, tokenizer,
+        rng_generator = JaxRNG(rng)
+        batch = with_sharding_constraint(batch, PS(('dp', 'fsdp')))
+        loss_and_metrics = lambda policy_params: dpo_forward_backward(
+            policy_params['params'], reference_params, reward_params,
+            policy_model, reference_model, reward_model,
+            rng_generator(), batch, tokenizer,
         )
-    sharded_ppo_forward_backward = pjit(
-        ppo_forward_backward_wrapper,
-        in_shardings=(train_state_partition_policy, train_state_partition_policy.params, train_state_partition_reward, train_state_partition_reward.params, PS(), PS()),
-        out_shardings=(train_state_partition_policy, train_state_partition_reward, PS(), PS(), PS()),
-        donate_argnums=(0, 2, 4),  # policy train state, value train state, and rng
+        grad_fn = jax.value_and_grad(loss_and_metrics, has_aux=True)
+        (_, metrics), grads = grad_fn(policy_train_state.params)
+        policy_train_state = policy_train_state.apply_gradients(grads=grads)
+        return policy_train_state, rng_generator(), batch, metrics
+    
+    sharded_dpo_forward_backward = pjit(
+        dpo_forward_backward_wrapper,
+        in_shardings=(train_state_partition_policy, train_state_partition_policy.params, train_state_partition_reward.params, PS(), PS()),
+        out_shardings=(train_state_partition_policy, PS(), PS(), PS()),
+        donate_argnums=(0, 3),  # policy train state and rng
     )
 
     checkpointer = StreamingCheckpointer(
         FLAGS.checkpointer, logger.output_dir,
         enable=jax.process_index() == 0,
     )
-    def save_checkpoint(policy_train_state, value_train_state, step, milestone=False):
+    def save_checkpoint(policy_train_state, step, milestone=False):
         metadata = dict(
             step=step,
             variant=variant,
@@ -503,14 +416,6 @@ def main(argv):
             metadata=metadata,
             milestone=milestone,
             step=step,
-        )
-        checkpointer.save_all(
-            train_state=value_train_state,
-            gather_fns=gather_fns_reward,
-            metadata=metadata,
-            milestone=milestone,
-            step=step,
-            is_value=True,
         )
 
     mesh = LLaMAConfig.get_jax_mesh(FLAGS.mesh_dim)
@@ -529,21 +434,6 @@ def main(argv):
                     policy_params = flax.core.frozen_dict.unfreeze(policy_params)
                 policy_train_state = sharded_create_trainstate_from_params_policy(policy_params)
                 del policy_params
-
-        # Load value
-        value_train_state, value_params = None, None
-        if FLAGS.load_checkpoint_reward != '':
-            print("Loading checkpoint (value) ... (may take time to download)")
-            value_train_state, value_params = checkpointer.load_trainstate_checkpoint(FLAGS.load_checkpoint_reward, train_state_shapes_reward, shard_fns_reward)
-            print("Checkpoint (value) loaded.")
-        if value_train_state is None:
-            if value_params is None:
-                value_train_state = sharded_init_fn_reward(next_rng())
-            else:
-                if not FLAGS.use_tpu:
-                    value_params = flax.core.frozen_dict.unfreeze(value_params)
-                value_train_state = sharded_create_trainstate_from_params_reward(value_params)
-                del value_params
 
         # Load reference
         reference_params = None
@@ -565,11 +455,12 @@ def main(argv):
             reward_train_state, reward_params = checkpointer.load_trainstate_checkpoint(FLAGS.load_checkpoint_reward, train_state_shapes_reward, shard_fns_reward)
             print("Checkpoint (reward) loaded.")
             assert reward_train_state is None
-        if reward_params is None:
-            reward_params = copy.deepcopy(value_train_state.params)
         else:
-            if not FLAGS.use_tpu:
-                reward_params = flax.core.frozen_dict.unfreeze(reward_params)
+            if reward_params is None:
+                reward_params = sharded_init_fn_reward(next_rng()).params
+            else:
+                if not FLAGS.use_tpu:
+                    reward_params = flax.core.frozen_dict.unfreeze(reward_params)
 
         sharded_rng = next_rng()
 
@@ -580,7 +471,7 @@ def main(argv):
                 # jax.profiler.save_device_memory_profile('/dev/shm/memory.prof')
 
                 # Prepare batch for multi-rollout. The same prompts appear adjacently, so they end up in the same backward minibatch and there's some contrastive signal.
-                batch = {k: jnp.repeat(v, FLAGS.rollouts_per_prompt, axis=0) for k, v in batch.items()}
+                batch = {k: jnp.repeat(v, 2, axis=0) for k, v in batch.items()}
 
                 t0 = time.time()
                 t = time.time()
@@ -593,7 +484,7 @@ def main(argv):
 
                 if FLAGS.generate_only:
                     stats = {
-                        'time/ppo/rollout': time_rollout,
+                        'time/dpo/rollout': time_rollout,
                     }
                     queries = tokenizer.batch_decode(batch['prompt_input_ids'], skip_special_tokens=False, clean_up_tokenization_spaces=False)
                     responses = tokenizer.batch_decode(batch['cont_input_ids'], skip_special_tokens=False, clean_up_tokenization_spaces=False)
@@ -609,13 +500,11 @@ def main(argv):
                     for mb_start in range(0, batch['input_ids'].shape[0], FLAGS.mini_batch_size):
                         mb_end = mb_start + FLAGS.mini_batch_size
                         mb_batch = {k: v[mb_start:mb_end] for k, v in batch.items()}
-                        policy_train_state, value_train_state, sharded_rng, mb_batch, stats = sharded_ppo_forward_backward(
-                            policy_train_state, reference_params, value_train_state, reward_params, sharded_rng, mb_batch
+                        policy_train_state, sharded_rng, mb_batch, stats = sharded_dpo_forward_backward(
+                            policy_train_state, reference_params, reward_params, sharded_rng, mb_batch
                         )
                         jax.tree_map(lambda x: x.block_until_ready(), policy_train_state.params)
                         jax.tree_map(lambda x: x.block_until_ready(), policy_train_state.opt_state)
-                        jax.tree_map(lambda x: x.block_until_ready(), value_train_state.params)
-                        jax.tree_map(lambda x: x.block_until_ready(), value_train_state.opt_state)
                         mb_batch = {k: jax.device_get(v) for k, v in mb_batch.items()}
                         stats = {k: jax.device_get(v) for k, v in stats.items()}
                         all_mbs.append(mb_batch)
@@ -631,26 +520,24 @@ def main(argv):
                 if FLAGS.log_freq > 0 and global_step % FLAGS.log_freq == 0:
                     stats = {k: float(v) for k, v in stats.items()}
                     stats.update({
-                        'ppo/learning_rate_policy': policy_optimizer_info['learning_rate_schedule'](global_step * grad_updates_per_step).item(),
-                        'ppo/learning_rate_value': value_optimizer_info['learning_rate_schedule'](global_step * grad_updates_per_step).item(),
-                        'time/ppo/rollout': time_rollout,
-                        'time/ppo/forward_backward': time_forward_backward,
-                        'time/ppo/total': time_total,
+                        'odpo/learning_rate_policy': policy_optimizer_info['learning_rate_schedule'](global_step * grad_updates_per_step).item(),
+                        'time/odpo/rollout': time_rollout,
+                        'time/odpo/forward_backward': time_forward_backward,
+                        'time/odpo/total': time_total,
                     })
                     queries = tokenizer.batch_decode(batch['prompt_input_ids'], skip_special_tokens=False, clean_up_tokenization_spaces=False)
                     responses = tokenizer.batch_decode(batch['cont_input_ids'], skip_special_tokens=False, clean_up_tokenization_spaces=False)
-                    rewards = batch['reward']
-                    rows = [[q, r, float(reward)] for q, r, reward in zip(queries, responses, rewards)]
-                    stats['game_log'] = wandb.Table(columns=['query', 'response', 'reward'], rows=rows)
+                    rows = [[q, r] for q, r in zip(queries, responses)]
+                    stats['game_log'] = wandb.Table(columns=['query', 'response'], rows=rows)
                     logger.log(stats)
 
                 if FLAGS.save_milestone_freq > 0 and global_step % FLAGS.save_milestone_freq == 0:
-                    save_checkpoint(policy_train_state, value_train_state, step=global_step, milestone=True)
+                    save_checkpoint(policy_train_state, step=global_step, milestone=True)
                 elif FLAGS.save_model_freq > 0 and global_step % FLAGS.save_model_freq == 0:
-                    save_checkpoint(policy_train_state, value_train_state, step=global_step)
+                    save_checkpoint(policy_train_state, step=global_step)
             # save model at the end of each epoch
             if FLAGS.save_model_freq > 0 or FLAGS.save_milestone_freq > 0:
-                save_checkpoint(policy_train_state, value_train_state, step=global_step, milestone=True)
+                save_checkpoint(policy_train_state, step=global_step, milestone=True)
 
 
 if __name__ == "__main__":

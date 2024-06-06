@@ -127,6 +127,7 @@ class AdamWOptimizerFactory(object):
         config.init_lr = 0.0
         config.end_lr = 0.001
         config.lr = 0.01
+        config.lr_freeze_steps = 0
         config.lr_warmup_steps = 2000
         config.lr_decay_steps = 500000
         config.warmup_ratio = 0.0
@@ -145,18 +146,33 @@ class AdamWOptimizerFactory(object):
     def get_optimizer(cls, config, weight_decay_mask=None):
         config = cls.get_default_config(config)
 
-        learning_rate_schedule = optax.join_schedules([
-            optax.linear_schedule(
-                init_value=config.init_lr,
-                end_value=config.lr,
-                transition_steps=config.lr_warmup_steps,
-            ),
-            optax.linear_schedule(
-                init_value=config.lr,
-                end_value=config.end_lr,
-                transition_steps=config.lr_decay_steps - config.lr_warmup_steps,
-            )
-        ], [config.lr_warmup_steps])
+        if config.lr_freeze_steps == 0:
+            learning_rate_schedule = optax.join_schedules([
+                optax.linear_schedule(
+                    init_value=config.init_lr,
+                    end_value=config.lr,
+                    transition_steps=config.lr_warmup_steps,
+                ),
+                optax.linear_schedule(
+                    init_value=config.lr,
+                    end_value=config.end_lr,
+                    transition_steps=config.lr_decay_steps - config.lr_warmup_steps,
+                )
+            ], [config.lr_warmup_steps])
+        else:
+            learning_rate_schedule = optax.join_schedules([
+                optax.constant_schedule(config.init_lr),
+                optax.linear_schedule(
+                    init_value=config.init_lr,
+                    end_value=config.lr,
+                    transition_steps=config.lr_warmup_steps,
+                ),
+                optax.linear_schedule(
+                    init_value=config.lr,
+                    end_value=config.end_lr,
+                    transition_steps=config.lr_decay_steps - config.lr_warmup_steps,
+                )
+            ], [config.lr_freeze_steps, config.lr_freeze_steps + config.lr_warmup_steps])
 
         optimizer_info = dict(
             learning_rate_schedule=learning_rate_schedule,

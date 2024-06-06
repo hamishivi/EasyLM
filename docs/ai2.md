@@ -139,29 +139,32 @@ I have arguments for the beta, etc, but these are not used here. Other example s
 Here's an example PPO training script:
 ```bash
 cd easylm; git pull; export LIBTPU_INIT_ARGS='--xla_jf_spmd_threshold_for_windowed_einsum_mib=0 --xla_tpu_spmd_threshold_for_allgather_cse=10000 --xla_tpu_spmd_rewrite_einsum_with_reshape=true --xla_tpu_enable_latency_hiding_scheduler=true TPU_MEGACORE=MEGACORE_DENSE'; python3 -m EasyLM.models.llama.llama_train_ppo \
-    --mesh_dim='1,64,8' \ # The first dimension must be 1
+    --mesh_dim='1,64,4' \
     --load_llama_config_policy='13b' \
     --load_llama_config_reward='13b' \
     --load_checkpoint_policy='params::gs://hamishi-east1/easylm/llama2/tulu2_13b_fixed/tulu2_13b_fixed/455af914503740be9664497dae996762/streaming_params' \
-    --load_checkpoint_reward='params::gs://hamishi-east1/llama_13b_base_rm_uf_only/95e869f8a29741c989899232cb35ff70/streaming_params_1903' \ # You may want to switch to new RMs
+    --load_checkpoint_reward='params::gs://hamishi-east1/rm/tulu2_13b_ultrafeedback_rm/7371c411dcfd4b09994aaa50a3a07128/streaming_params_1903' \
     --tokenizer.vocab_file='gs://jiachengl-east1/tokenizer.model' \
     --tokenizer.add_bos_token=True \
-    --train_dataset.type='hf_prompt' \
-    --train_dataset.text_processor.fields='[instruction]' \
-    --train_dataset.hf_prompt_dataset.path='argilla/ultrafeedback-binarized-preferences' \
-    --train_dataset.hf_prompt_dataset.seq_length=1024 \
+    --train_dataset.type='tulu_prompt' \
+    --train_dataset.tulu_prompt_dataset.path='gs://hamishi-east1/easylm/data/converted_pref_data/ultrafeedback_mean_aspects_cleaned.jsonl' \
+    --train_dataset.tulu_prompt_dataset.seq_length=1024 \
     --max_continuation_len=1024 \
-    --train_dataset.hf_prompt_dataset.batch_size=64 \
-    --mini_batch_size=64 \ # Please match the batch_size above
-    --train_dataset.hf_prompt_dataset.num_workers=16 \
+    --train_dataset.tulu_prompt_dataset.batch_size=512 \
+    --rollouts_per_prompt=1 \
+    --mini_batch_size=64 \
+    --train_dataset.tulu_prompt_dataset.num_workers=16 \
+    --train_dataset.tulu_prompt_dataset.remove_truncated_samples=True \
     --optimizer.type='adamw' \
+    --optimizer.accumulate_gradient_steps=1 \
     --optimizer.adamw_optimizer.weight_decay=0.0 \
-    --optimizer.adamw_optimizer.warmup_ratio=0.1 \
+    --warmup_epochs=0.1 \
+    --policy_freeze_epochs=0.0 \
     --checkpointer.save_optimizer_state=False \
     --logger.online=True \
     --logger.entity='liujch1998' \ # Remember to change this to your WANDB entity
     --logger.project='n-Tulu-PPO-Jax' \ # Remember to change this to your WANDB project
-    --logger.prefix='train_v2.2_v2.1_llama-13b-base-rm-uf-only' \ # Bump this version number for each run. Format: train_{new_version}_{old_version}_{describe_the_diff}
+    --logger.prefix='train_v3.2_v3_interleave-fwd-bwd_nofreeze' \ # Bump this version number for each run. Format: train_{new_version}_{old_version}_{describe_the_diff}
     --logger.prefix_to_id=True \
     --logger.wandb_dir='/home/jiachengl/wandb' \ # Remember to change this to your TPU's local directory
     --logger.output_dir='gs://jiachengl-east1/n-tulu-ppo-jax/' \ # You may keep using this, or change to your GCS bucket
@@ -169,23 +172,36 @@ cd easylm; git pull; export LIBTPU_INIT_ARGS='--xla_jf_spmd_threshold_for_window
     --ppo_epochs=1 \
     --lr=1e-6 \
     --kl_coef=0.05 \
-    --save_milestone_freq=100 \
+    --reward_gain=1.0 --reward_bias=0.0 \
+    --save_milestone_freq=116 \
     --num_epochs=1 \
     &> /home/jiachengl/all.log &" # Remember to change this to your TPU's local directory
 ```
 
-You may also refer to `examples/ppo_13b_tpu512.sh`, this is the script I use to start jobs.
+You may also refer to `examples/ppo_13b_tpu.sh`, this is the script I use to start jobs.
 I set an environment variable `WANDB_API_KEY` with the value on my AI2 server, if you went through the standard `wandb login` process, you may remove that command.
 
+**How to set hyperparameters:**
+There are a few hyperparameters that are somewhat related and you need to watch out for constaints.
+If you are not sure what values to use, you can use the default values below.
+* **mesh_dim**: This is a tuple of three integers, corresponding to the (DP, FSDP, MP) dimensions. The product of these three numbers should be equal to the number of TPUs. Please always set the DP dimension to 1; I noticed that otherwise it will mess up with the rollouts, and I couldn't figure out a solution. Default: (1, 64, 4).
+* **prompt_batch_size** ($B_p$), **rollouts_per_prompt** ($r$): $B_p$ is the batch size with which the prompt dataset is chunked into, and each batch of prompts correspond to one "step" in the WANDB log. Each prompt is rolled out $r$ times. $B_c$ (**completion_batch_size**) is the effective batch size after the rollout, and is automatically set to $B_c = B_p \times r$. Default: $B_p = 512, r = 1$.
+* **forward_mini_batch_size** ($B_f$), **backward_mini_batch_size** ($B_b$): These are the batch sizes used for rollouts, forward passes, and backward passes. $B_f$ and $B_b$ must each be both a divisor of $B_c$ and a multiple of (DP x FSDP); I usually set them to be equal to (DP x FSDP) and haven't tested otherwise. Default: $B_f = B_b = 64$.
+* Note: as of v3.2, forward_mini_batch_size and backward_mini_batch_size are merged into a single hparam, **mini_batch_size**.
+* **gradient_accumulation_steps** ($g$): The number of backward passes before a gradient update is done. Typically I'd say make $B_b \times g \le B_c$. Default: $g = 1$.
+* **ppo_epochs** ($e$): The number of inner epochs performed on each batch of completions. Default: $e = 1$.
+* **How many batches of prompts are there in an epoch?** Say the length of prompt dataset is $D$. Then the answer is $D / B_p$.
+* **How many gradient updates are done?** For each batch of prompts, the number of gradient updates is $(B_c \times e) / (B_b \times g)$. For one full epoch, the number of gradient updates is $(D \times r \times e) / (B_b \times g)$.
+* **warmup_epochs**: The number of epochs during which LR is being linearly warmed up. Default: 0.1.
+<!-- * **policy_freeze_epochs**: The number of epochs to wait before policy LR starts warming up. The purpose is to let the value model train for a period and converge, so that the policy doesn't train on garbage value estimates. Default: 0.5. -->
+
 A few notes:
-* **mesh_dim:** Please always set the first dimension (the DP dimension) to 1. I noticed that otherwise it will mess up with the rollouts, and we couldn't figure out a solution. The product of second (FSDP) and third (MP) dimensions should be equal to the number of TPUs, I haven't tested when they are not equal.
-* **mini_batch_size:** Theoretically you can use a smaller divisor of `batch_size`, but I haven't tested it, so it would be a good idea to keep them the same.
 * **RM prompt format:** By default we assume that the RM is trained to take the same format as in Tulu. If you use the original `UltraRM-13b`, you need to customize the RM prompt format by adding these options:
 ```
     --train_dataset.hf_prompt_dataset.reward_prefix_tokens='Human: ' \
     --train_dataset.hf_prompt_dataset.reward_suffix_tokens='\nAssistant: ' \
 ```
-* **Time:** On a v3-512 TPU, training a 13b-13b model takes about 5 minutes per iteration, and a full epoch (~1000 steps) takes about 3 days.
+* **Time:** On a v3-256 TPU, training a 13b-13b model for 1 epoch (with the default hparams above) takes about 7 minutes per iteration, and a full epoch (~120 batches) takes about 16 hours.
 
 ## Killing a job
 
