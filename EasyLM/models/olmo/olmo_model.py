@@ -127,9 +127,9 @@ class OLMoConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         initializer_range=0.02,
         use_cache=True,
-        # pad_token_id=-1,
-        bos_token_id=0,
-        eos_token_id=1,
+        pad_token_id=1,
+        bos_token_id=50279,
+        eos_token_id=50279,
         resid_pdrop=0.0,
         embd_pdrop=0.0,
         attn_pdrop=0.0,
@@ -346,13 +346,17 @@ class RotaryEmbedding(nn.Module):
     def apply_rotary_pos_emb(self, pos_sin, pos_cos, t):
         return jnp.array((t * pos_cos) + (self.rotate_half(t) * pos_sin), t.dtype)
 
-    def __call__(self, q, k):
+    def __call__(self, q, k, position_ids=None):
         q_, k_ = q, k
+        bsz = q_.shape[0]
         query_len, key_len = q_.shape[1], k_.shape[1]  # could be different if layer_past not None
         # pos_sin, pos_cos = self.get_rotary_embedding(key_len, q_.device)
-
-        pos_sin = self.pos_sin[:,:key_len]
-        pos_cos = self.pos_cos[:,:key_len]
+        if position_ids is not None:
+            pos_sin = jnp.take_along_axis(self.pos_sin, position_ids[:,:,None,None], axis=1)
+            pos_cos = jnp.take_along_axis(self.pos_cos, position_ids[:,:,None,None], axis=1)
+        else:
+            pos_sin = self.pos_sin[:,:key_len]
+            pos_cos = self.pos_cos[:,:key_len]
         
         pos_sin = jnp.array(pos_sin, q_.dtype)
         pos_cos = jnp.array(pos_cos, q_.dtype)
@@ -363,7 +367,6 @@ class RotaryEmbedding(nn.Module):
             q_,
         )
         k_ = self.apply_rotary_pos_emb(pos_sin, pos_cos, k_)
-
         return q_, k_
 
 
@@ -501,7 +504,7 @@ class FlaxOLMoAttention(nn.Module):
         # freqs_cis = jnp.take(self.freqs_cis, position_ids, axis=0)
 
         # xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=self.dtype)
-        xq, xk = self.rotary_emb(xq, xk)
+        xq, xk = self.rotary_emb(xq, xk, position_ids)
 
         dropout_rng = None
         if not deterministic and self.config.attn_pdrop > 0.0:
@@ -1113,7 +1116,7 @@ class FlaxOLMoForCausalLM(FlaxOLMoPreTrainedModel):
             extended_attention_mask = lax.dynamic_update_slice(extended_attention_mask, attention_mask, (0, 0))
         else:
             position_ids = jnp.broadcast_to(jnp.arange(seq_length, dtype="i4")[None, :], (batch_size, seq_length))
-
+    
         return {
             "past_key_values": past_key_values,
             "attention_mask": extended_attention_mask,
@@ -1280,7 +1283,7 @@ if __name__ == '__main__':
     from EasyLM.jax_utils import JaxRNG, next_rng
     import torch
     tokenizer = AutoTokenizer.from_pretrained('allenai/OLMo-1.7-7B-hf')
-    hf_model = AutoModelForCausalLM.from_pretrained('allenai/OLMo-1.7-7B-hf')
+    # hf_model = AutoModelForCausalLM.from_pretrained('allenai/OLMo-1.7-7B-hf')
     olmo_config = OLMoConfig.load_config('17_7b')
     jax_model = FlaxOLMoForCausalLMModule(
         olmo_config, dtype=jnp.float32
@@ -1289,7 +1292,11 @@ if __name__ == '__main__':
         StreamingCheckpointer.get_default_config(), 'output',
         enable=jax.process_index() == 0,
     )
-    _, restored_params = checkpointer.load_trainstate_checkpoint('params::olmo_17_7b_hf')
+    _, restored_params = checkpointer.load_trainstate_checkpoint('params::streaming_params_61137')
+    model = FlaxOLMoForCausalLM(olmo_config, _do_init=False)
+    from transformers import GenerationConfig
+    res = model.generate(tokenizer("<|user|>\nWhat is 2+2?\n<|assistant|>\n", return_tensors="jax").input_ids, params=restored_params['params'], generation_config=GenerationConfig(eos_token_id=tokenizer.eos_token_id, bos_token_id=tokenizer.bos_token_id, pad_token_id=tokenizer.pad_token_id, max_new_tokens=100))[0]
+    import pdb; pdb.set_trace()
     inputs = tokenizer("What is 2+2?", return_tensors='jax').input_ids
     hf_logits = hf_model(torch.tensor(np.array(inputs))).logits
     jax_logits = jax_model.apply(
