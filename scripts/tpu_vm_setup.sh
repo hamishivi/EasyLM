@@ -33,7 +33,7 @@ tqdm
 h5py
 ml_collections
 wandb==0.13.5
-gcsfs==2022.11.0
+gcsfs>=2022.11.0
 requests
 typing-extensions
 lm-eval==0.3.0
