@@ -28,12 +28,12 @@ einops
 torch==2.0.1
 transformers==4.41.0
 datasets==2.14.2
-huggingface_hub==0.16.4
+huggingface_hub==0.23.4
 tqdm
 h5py
 ml_collections
 wandb==0.13.5
-gcsfs==2022.11.0
+gcsfs>=2022.11.0
 requests
 typing-extensions
 lm-eval==0.3.0
