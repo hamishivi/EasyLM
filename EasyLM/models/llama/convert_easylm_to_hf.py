@@ -110,6 +110,57 @@ LLAMA_STANDARD_CONFIGS = {
         'norm_eps': 1e-5,
         'vocab_size': 128256,
         'rope_theta': 500000,
+    },
+    '8b31': {
+        'dim': 4096,
+        'intermediate_size': 14336,
+        'n_layers': 32,
+        'n_heads': 32,
+        'n_kv_heads': 8,
+        'norm_eps': 1e-6,
+        'vocab_size': 128256,
+        'rope_theta': 500000,
+        'rope_scaling': {
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "llama3"
+        },
+    },
+    '70b31': {
+        'dim': 8192,
+        'intermediate_size': 28672,
+        'n_layers': 80,
+        'n_heads': 64,
+        'n_kv_heads': 8,
+        'norm_eps': 1e-5,
+        'vocab_size': 128256,
+        'rope_theta': 500000,
+        'rope_scaling': {
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "llama3"
+        },
+    },
+    '405b31': {
+        'dim': 16384,
+        'intermediate_size': 53248,
+        'n_layers': 126,
+        'n_heads': 128,
+        'n_kv_heads': 16,
+        'rms_norm_eps': 1e-5,
+        'vocab_size': 128256,
+        'rope_theta': 500000,
+        'rope_scaling': {
+            "factor": 8.0,
+            "low_freq_factor": 1.0,
+            "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "llama3"
+        },
     }
 }
 
@@ -234,6 +285,7 @@ def write_model(loaded, model_path, model_size, is_reward_model=False):
         num_key_value_heads=params.get("n_kv_heads", params["n_heads"]),
         vocab_size=params.get("vocab_size", 32000),  # default to llama 2 size
         rope_theta=params.get("rope_theta", 100000,) # default to llama 2 size
+        rope_scaling=params.get("rope_scaling", None) # default to none (llama 2/3.0)
     )
     # Set the number of labels to 1 for reward models.
     if is_reward_model:

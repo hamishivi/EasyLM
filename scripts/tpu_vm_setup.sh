@@ -26,9 +26,9 @@ chex==0.1.7
 einops
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.0.1
-transformers==4.41.0
-datasets==2.14.2
-huggingface_hub==0.23.4
+transformers==4.43.2
+datasets>=2.14.2
+huggingface_hub>=0.23.4
 tqdm
 h5py
 ml_collections

@@ -261,6 +261,60 @@ LLAMA_STANDARD_CONFIGS = {
         'eos_token_id': 128001,
         'use_hf_rotary_emb': False
     },
+    '8b31': {
+        'vocab_size': 128256,
+        'hidden_size': 4096,
+        'intermediate_size': 14336,
+        'num_hidden_layers': 32,
+        'num_attention_heads': 32,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+        'rope_theta': 500000,
+        'bos_token_id': 128000,
+        'eos_token_id': 128001,
+        'use_hf_rotary_emb': False,
+        'use_scaled_rope': True
+    },
+    '70b31': {
+        'vocab_size': 128256,
+        'hidden_size': 8192,
+        'intermediate_size': 28672,
+        'num_hidden_layers': 80,
+        'num_attention_heads': 64,
+        'num_key_value_heads': 8,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+        'rope_theta': 500000,
+        'bos_token_id': 128000,
+        'eos_token_id': 128001,
+        'use_hf_rotary_emb': False,
+        'use_scaled_rope': True
+    },
+    '405b31': {
+        'vocab_size': 128256,
+        'hidden_size': 16384,
+        'intermediate_size': 53248,
+        'num_hidden_layers': 126,
+        'num_attention_heads': 128,
+        'num_key_value_heads': 16,
+        'max_sequence_length': 8192,
+        'initializer_range': 0.02,
+        'rms_norm_eps': 1e-5,
+        'use_cache': True,
+        'tie_word_embeddings': False,
+        'rope_theta': 500000,
+        'bos_token_id': 128000,
+        'eos_token_id': 128001,
+        'use_hf_rotary_emb': False,
+        'use_scaled_rope': True
+    }
 }
 
 
@@ -339,6 +393,7 @@ class LLaMAConfig(PretrainedConfig):
         fcm_max_ratio=0.0,
         rope_theta=10000,
         use_hf_rotary_emb=False,
+        use_scaled_rope=False,  ## llama 3.1 change
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -367,6 +422,7 @@ class LLaMAConfig(PretrainedConfig):
         self.fcm_max_ratio = fcm_max_ratio
         self.rope_theta = rope_theta
         self.use_hf_rotary_emb = use_hf_rotary_emb
+        self.use_scaled_rope = use_scaled_rope
         super().__init__(
             # pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -493,9 +549,39 @@ class RMSNorm(nn.Module):
         weight = jnp.asarray(self.weight, self.dtype)
         return output * weight
 
-def precompute_freqs_cis(dim: int, end: int, theta: float=10000.0, dtype: jnp.dtype=jnp.float32) -> jnp.ndarray:
+
+def apply_scaling(freqs: jnp.ndarray):
+    # copied from https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/api/model.py#L41
+    # with small changes for pytorch -> jax
+    # Values obtained from grid search
+    scale_factor = 8
+    low_freq_factor = 1
+    high_freq_factor = 4
+    old_context_len = 8192  # original llama3 length
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    new_freqs = []
+    for freq in freqs:
+        wavelen = 2 * np.pi / freq
+        if wavelen < high_freq_wavelen:
+            new_freqs.append(freq)
+        elif wavelen > low_freq_wavelen:
+            new_freqs.append(freq / scale_factor)
+        else:
+            assert low_freq_wavelen != high_freq_wavelen
+            smooth = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            new_freqs.append((1 - smooth) * freq / scale_factor + smooth * freq)
+    return np.asarray(new_freqs).astype(freqs.dtype)
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float=10000.0, dtype: jnp.dtype=jnp.float32, use_scaled: bool = False) -> jnp.ndarray:
     freqs = 1.0 / (theta ** (np.arange(0, dim, 2)[: (dim // 2)].astype(dtype) / dim))
     t = np.arange(end)  # type: ignore
+    if use_scaled:
+        freqs = apply_scaling(freqs)
     freqs = np.outer(t, freqs).astype(dtype)  # type: ignore
     sin, cos = np.sin(freqs), np.cos(freqs)
     freqs_cis = np.complex64(cos + 1j * sin)
@@ -601,6 +687,7 @@ class FlaxLLaMAAttention(nn.Module):
             config.max_sequence_length * 2,
             theta=self.config.rope_theta,
             dtype=self.dtype,
+            use_scaled=config.use_scaled_rope
         )
 
     def _split_heads(self, hidden_states, num_heads):
@@ -1651,9 +1738,9 @@ if __name__ == '__main__':
     from EasyLM.checkpoint import StreamingCheckpointer
     from EasyLM.jax_utils import JaxRNG, next_rng
     import torch
-    tokenizer = AutoTokenizer.from_pretrained('../Meta-Llama-3-70B')
-    hf_model = AutoModelForCausalLM.from_pretrained('../Meta-Llama-3-70B')
-    llama_config = LLaMAConfig.load_config('70b3')
+    tokenizer = AutoTokenizer.from_pretrained('/data/hamishi/Meta-Llama-3.1-70B')
+    hf_model = AutoModelForCausalLM.from_pretrained('/data/hamishi/Meta-Llama-3.1-70B')
+    llama_config = LLaMAConfig.load_config('70b31')
     jax_model = FlaxLLaMAForCausalLMModule(
         llama_config, dtype=jnp.float32
     )
@@ -1661,7 +1748,7 @@ if __name__ == '__main__':
         StreamingCheckpointer.get_default_config(), 'output',
         enable=jax.process_index() == 0,
     )
-    _, restored_params = checkpointer.load_trainstate_checkpoint('params::llama_3_70b_fp16')
+    _, restored_params = checkpointer.load_trainstate_checkpoint('params::llama_3_1_70b')
     inputs = tokenizer("What is 2+2?", return_tensors='jax').input_ids
     hf_logits = hf_model(torch.tensor(np.array(inputs))).logits
     jax_logits = jax_model.apply(

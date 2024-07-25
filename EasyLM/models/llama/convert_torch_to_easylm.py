@@ -55,7 +55,6 @@ def main(argv):
         },
         'lm_head': {'kernel': np.concatenate([ckpt['output.weight'].to(torch.float16).numpy() for ckpt in ckpts], axis=0).transpose()},
     }
-    import pdb; pdb.set_trace()
     if FLAGS.streaming:
         StreamingCheckpointer.save_train_state_to_file(
             jax_weights, FLAGS.output_file
