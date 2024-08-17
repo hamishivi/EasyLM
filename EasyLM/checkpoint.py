@@ -13,6 +13,7 @@ import msgpack
 
 from EasyLM.jax_utils import tree_apply, float_tensor_to_dtype
 
+MAX_MSGPACK_BUFFER_SIZE = 2**31 - 1
 
 class StreamingCheckpointer(object):
     """ Custom msgpack checkpointer that saves large train states by serializing
@@ -57,7 +58,16 @@ class StreamingCheckpointer(object):
                 if gather_fns is not None:
                     value = gather_fns[key](value)
                 value = float_tensor_to_dtype(value, float_dtype)
-                fout.write(packer.pack((key, to_bytes(value))))
+                value_bytes = to_bytes(value)
+                
+                # Split the value into chunks if it's larger than MAX_BUFFER_SIZE
+                if len(value_bytes) > MAX_MSGPACK_BUFFER_SIZE:
+                    num_chunks = (len(value_bytes) + MAX_MSGPACK_BUFFER_SIZE - 1) // MAX_MSGPACK_BUFFER_SIZE
+                    for i in range(num_chunks):
+                        chunk_key = (*key, f"chunk_{i}")
+                        fout.write(packer.pack((chunk_key, value_bytes[i * MAX_MSGPACK_BUFFER_SIZE: (i + 1) * MAX_MSGPACK_BUFFER_SIZE])))
+                else:
+                    fout.write(packer.pack((key, value_bytes)))
 
     def save_pickle(self, obj, filename):
         if self.enable:
@@ -99,15 +109,15 @@ class StreamingCheckpointer(object):
     @staticmethod
     def load_checkpoint(path, target=None, shard_fns=None, remove_dict_prefix=None, keys_to_ignore=None):
         if shard_fns is not None:
-            shard_fns = flatten_dict(
-                to_state_dict(shard_fns)
-            )
+            shard_fns = flatten_dict(to_state_dict(shard_fns))
         if remove_dict_prefix is not None:
             remove_dict_prefix = tuple(remove_dict_prefix)
+        
         flattend_train_state = {}
         with mlxu.open_file(path) as fin:
-            # 83886080 bytes = 80 MB, which is 16 blocks on GCS
-            unpacker = msgpack.Unpacker(fin, read_size=83886080, max_buffer_size=0)
+            unpacker = msgpack.Unpacker(fin, read_size=MAX_BUFFER_SIZE, max_buffer_size=0)
+            chunk_buffers = {}
+            
             for key, value in unpacker:
                 key = tuple(key)
                 if keys_to_ignore is not None and key in keys_to_ignore:
@@ -118,15 +128,29 @@ class StreamingCheckpointer(object):
                     else:
                         continue
 
-                tensor = from_bytes(None, value)
+                # Handle chunks
+                if "chunk_" in key[-1]:
+                    base_key = key[:-1]
+                    if base_key not in chunk_buffers:
+                        chunk_buffers[base_key] = []
+                    chunk_buffers[base_key].append((int(key[-1].split("_")[1]), value))
+                else:
+                    tensor = from_bytes(None, value)
+                    if shard_fns is not None:
+                        tensor = shard_fns[key](tensor)
+                    flattend_train_state[key] = tensor
+
+            # Reassemble chunks
+            for base_key, chunks in chunk_buffers.items():
+                chunks.sort()  # Sort chunks by index
+                full_value = b''.join(chunk[1] for chunk in chunks)
+                tensor = from_bytes(None, full_value)
                 if shard_fns is not None:
-                    tensor = shard_fns[key](tensor)
-                flattend_train_state[key] = tensor
+                    tensor = shard_fns[base_key](tensor)
+                flattend_train_state[base_key] = tensor
 
         if target is not None:
-            flattened_target = flatten_dict(
-                to_state_dict(target), keep_empty_nodes=True
-            )
+            flattened_target = flatten_dict(to_state_dict(target), keep_empty_nodes=True)
             for key, value in flattened_target.items():
                 if key not in flattend_train_state and value == empty_node:
                     flattend_train_state[key] = value
